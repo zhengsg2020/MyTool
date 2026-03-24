@@ -1,7 +1,9 @@
 <script setup>
 import { onMounted, reactive, ref } from "vue";
+import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
+const router = useRouter();
 const loading = ref(false);
 const sites = ref([]);
 
@@ -78,6 +80,10 @@ async function deleteSite(row) {
   }
 }
 
+function goSites() {
+  router.push("/sites");
+}
+
 onMounted(fetchSites);
 </script>
 
@@ -85,7 +91,10 @@ onMounted(fetchSites);
   <div class="page">
     <el-card class="card" shadow="never">
       <template #header>
-        <div class="header">新增网站配置</div>
+        <div class="header-row">
+          <div class="header">管理员 - 网站配置</div>
+          <el-button size="small" @click="goSites">返回网站</el-button>
+        </div>
       </template>
       <el-form ref="formRef" :model="form" :rules="rules" label-width="90px">
         <el-form-item label="网站名称" prop="name">
@@ -143,5 +152,10 @@ onMounted(fetchSites);
 }
 .header {
   font-weight: 600;
+}
+.header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 </style>

@@ -4,7 +4,9 @@ import { useRoute, useRouter } from "vue-router";
 
 const route = useRoute();
 const router = useRouter();
-const active = computed(() => (route.path.startsWith("/sites") ? "sites" : "build"));
+const active = computed(() =>
+  route.path.startsWith("/sites") || route.path.startsWith("/admin") ? "sites" : "build"
+);
 
 function goBuild() {
   router.push("/build");
@@ -22,7 +24,7 @@ function goSites() {
         构建发布
       </el-button>
       <el-button :type="active === 'sites' ? 'primary' : 'default'" @click="goSites">
-        网站管理
+        网站
       </el-button>
     </div>
     <router-view />

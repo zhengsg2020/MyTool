@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from "vue-router";
 import BuildPage from "../views/BuildPage.vue";
+import SiteListPage from "../views/SiteListPage.vue";
 import SiteManagePage from "../views/SiteManagePage.vue";
 
 const router = createRouter({
@@ -7,7 +8,8 @@ const router = createRouter({
   routes: [
     { path: "/", redirect: "/build" },
     { path: "/build", component: BuildPage },
-    { path: "/sites", component: SiteManagePage },
+    { path: "/sites", component: SiteListPage },
+    { path: "/admin", component: SiteManagePage },
   ],
 });
 
