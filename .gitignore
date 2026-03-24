@@ -44,11 +44,6 @@ Desktop.ini
 *.swo
 *~
 
-# --- Project: runtime config (copy config.example.json -> config.json) ---
-/config.json
-!/config.json
-!/config/
-!/config/build/
-!/config/build/config.json
-!/config/sites/
-!/config/sites/sites.json
+# --- Project config ---
+# `config.json` 与 `config/build/` 纳入版本管理；网站记录仅本地生成，不入库。
+/config/sites/
