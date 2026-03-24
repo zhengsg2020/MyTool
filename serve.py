@@ -61,15 +61,29 @@ def pip_install_requirements(py: Path) -> None:
 
 def npm_build() -> None:
     fe = ROOT / "frontend"
-    subprocess.run(["npm", "install"], cwd=fe, check=True)
-    subprocess.run(["npm", "run", "build"], cwd=fe, check=True)
+    npm = shutil.which("npm")
+    if not npm:
+        raise FileNotFoundError("npm not found")
+    subprocess.run([npm, "install"], cwd=fe, check=True)
+    subprocess.run([npm, "run", "build"], cwd=fe, check=True)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     py = ensure_venv()
     pip_install_requirements(py)
     if not args.skip_frontend:
-        npm_build()
+        try:
+            npm_build()
+        except FileNotFoundError:
+            dist_index = ROOT / "frontend" / "dist" / "index.html"
+            if dist_index.is_file():
+                print("[WARN] 未检测到 npm，已跳过前端构建并使用现有 frontend/dist。")
+                print("[INFO] 如需重新构建前端，请先安装 Node.js（含 npm）。")
+            else:
+                raise SystemExit(
+                    "[ERROR] 未检测到 npm，且 frontend/dist 不存在，无法完成前端构建。\n"
+                    "请安装 Node.js（含 npm）后重试，或先准备 frontend/dist 再运行。"
+                )
     env = os.environ.copy()
     env["CONFIG_PATH"] = str(ROOT / "config.json")
     env["FRONTEND_DIST"] = str(ROOT / "frontend" / "dist")
