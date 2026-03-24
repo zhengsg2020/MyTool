@@ -82,21 +82,26 @@ def save_config(cfg: dict[str, Any]) -> None:
 class SiteCreate(BaseModel):
     name: str = ""
     url: str = Field(min_length=1)
-    username: str = Field(min_length=1)
-    password: str = Field(min_length=1)
+    username: str = ""
+    password: str = ""
 
     @field_validator("name")
     @classmethod
     def trim_name(cls, value: str) -> str:
         return value.strip()
 
-    @field_validator("url", "username", "password")
+    @field_validator("url")
     @classmethod
     def trim_required_text(cls, value: str) -> str:
         text = value.strip()
         if not text:
             raise ValueError("字段不能为空")
         return text
+
+    @field_validator("username", "password")
+    @classmethod
+    def trim_optional_text(cls, value: str) -> str:
+        return value.strip()
 
     @field_validator("url")
     @classmethod

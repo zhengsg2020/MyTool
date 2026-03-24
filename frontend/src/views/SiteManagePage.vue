@@ -18,8 +18,6 @@ const rules = {
     { required: true, message: "请输入网站地址", trigger: "blur" },
     { type: "url", message: "请输入合法 URL", trigger: "blur" },
   ],
-  username: [{ required: true, message: "请输入账号", trigger: "blur" }],
-  password: [{ required: true, message: "请输入密码", trigger: "blur" }],
 };
 
 async function fetchSites() {
@@ -97,10 +95,10 @@ onMounted(fetchSites);
           <el-input v-model="form.url" placeholder="https://example.com" />
         </el-form-item>
         <el-form-item label="账号" prop="username">
-          <el-input v-model="form.username" />
+          <el-input v-model="form.username" placeholder="可选" />
         </el-form-item>
         <el-form-item label="密码" prop="password">
-          <el-input v-model="form.password" type="password" show-password />
+          <el-input v-model="form.password" type="password" show-password placeholder="可选" />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="submitForm">保存配置</el-button>
