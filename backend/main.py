@@ -33,6 +33,8 @@ def frontend_dist_dir() -> Path:
 
 
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", runtime_root() / "config.json"))
+DEFAULT_BUILD_CONFIG_PATH = runtime_root() / "config" / "build" / "config.json"
+DEFAULT_SITES_CONFIG_PATH = runtime_root() / "config" / "sites" / "sites.json"
 
 app = FastAPI(title="Docker Build Publisher")
 
@@ -67,7 +69,26 @@ else:
 
 def load_config() -> dict[str, Any]:
     with CONFIG_PATH.open(encoding="utf-8") as f:
-        return json.load(f)
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    build_cfg_path, sites_cfg_path = get_config_file_paths(cfg)
+
+    if "common_template" not in cfg or "projects" not in cfg:
+        build_cfg = load_json_file(build_cfg_path, {})
+        if not isinstance(build_cfg, dict):
+            build_cfg = {}
+        if "common_template" not in cfg:
+            cfg["common_template"] = build_cfg.get("common_template", {})
+        if "projects" not in cfg:
+            cfg["projects"] = build_cfg.get("projects", [])
+
+    if "sites" not in cfg:
+        sites_cfg = load_json_file(sites_cfg_path, [])
+        cfg["sites"] = sites_cfg if isinstance(sites_cfg, list) else []
+
+    return cfg
 
 
 def save_config(cfg: dict[str, Any]) -> None:
@@ -77,6 +98,62 @@ def save_config(cfg: dict[str, Any]) -> None:
         json.dump(cfg, f, ensure_ascii=False, indent=4)
         f.write("\n")
     os.replace(tmp_path, CONFIG_PATH)
+
+
+def load_json_file(path: Path, default: Any) -> Any:
+    if not path.is_file():
+        return default
+    try:
+        with path.open(encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return default
+
+
+def save_json_file(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="\n") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+        f.write("\n")
+    os.replace(tmp_path, path)
+
+
+def _resolve_config_ref(value: Any, default_path: Path) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        return default_path
+    ref = Path(value.strip())
+    if ref.is_absolute():
+        return ref
+    return runtime_root() / ref
+
+
+def get_config_file_paths(cfg: dict[str, Any]) -> tuple[Path, Path]:
+    refs = cfg.get("config_files")
+    if not isinstance(refs, dict):
+        refs = {}
+    build_path = _resolve_config_ref(refs.get("build"), DEFAULT_BUILD_CONFIG_PATH)
+    sites_path = _resolve_config_ref(refs.get("sites"), DEFAULT_SITES_CONFIG_PATH)
+    return build_path, sites_path
+
+
+def load_sites() -> list[dict[str, Any]]:
+    cfg = load_json_file(CONFIG_PATH, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    _, sites_path = get_config_file_paths(cfg)
+    sites = load_json_file(sites_path, [])
+    if isinstance(sites, list):
+        return [s for s in sites if isinstance(s, dict)]
+    return []
+
+
+def save_sites(sites: list[dict[str, Any]]) -> None:
+    cfg = load_json_file(CONFIG_PATH, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    _, sites_path = get_config_file_paths(cfg)
+    save_json_file(sites_path, sites)
 
 
 class SiteCreate(BaseModel):
@@ -184,10 +261,7 @@ async def list_projects():
 
 @app.get("/api/sites", response_model=list[SiteOut])
 async def list_sites():
-    cfg = load_config()
-    raw_sites = cfg.get("sites", [])
-    if not isinstance(raw_sites, list):
-        return []
+    raw_sites = load_sites()
     sites: list[SiteOut] = []
     for item in raw_sites:
         if isinstance(item, dict):
@@ -200,10 +274,7 @@ async def list_sites():
 
 @app.post("/api/sites", response_model=SiteOut)
 async def create_site(payload: SiteCreate):
-    cfg = load_config()
-    sites = cfg.get("sites")
-    if not isinstance(sites, list):
-        sites = []
+    sites = load_sites()
     site = SiteOut(
         id=str(uuid.uuid4()),
         name=payload.name,
@@ -213,22 +284,19 @@ async def create_site(payload: SiteCreate):
         created_at=datetime.now().isoformat(timespec="seconds"),
     )
     sites.append(site.model_dump())
-    cfg["sites"] = sites
-    save_config(cfg)
+    save_sites(sites)
     return site
 
 
 @app.delete("/api/sites/{site_id}")
 async def delete_site(site_id: str):
-    cfg = load_config()
-    sites = cfg.get("sites")
-    if not isinstance(sites, list):
+    sites = load_sites()
+    if not sites:
         raise HTTPException(status_code=404, detail="site not found")
     new_sites = [s for s in sites if not (isinstance(s, dict) and s.get("id") == site_id)]
     if len(new_sites) == len(sites):
         raise HTTPException(status_code=404, detail="site not found")
-    cfg["sites"] = new_sites
-    save_config(cfg)
+    save_sites(new_sites)
     return {"ok": True}
 
 
