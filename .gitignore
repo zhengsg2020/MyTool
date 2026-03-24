@@ -46,3 +46,9 @@ Desktop.ini
 
 # --- Project: runtime config (copy config.example.json -> config.json) ---
 /config.json
+!/config.json
+!/config/
+!/config/build/
+!/config/build/config.json
+!/config/sites/
+!/config/sites/sites.json

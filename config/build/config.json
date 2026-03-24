@@ -1,0 +1,13 @@
+{
+    "common_template": {
+        "container_name": "zsg-docker",
+        "build_script": "./run_build.sh",
+        "docker_work_dir_tpl": "/root/{name}",
+        "host_release_dir_tpl": "/home/root/zsg-docker_home/{name}/x64_Env/LinuxRelease",
+        "image_repo_tpl": "192.168.1.185:5005/dragon/{name}"
+    },
+    "projects": [
+        "lnp_trunk",
+        "lnp_dev"
+    ]
+}
