@@ -1,0 +1,5 @@
+* text=auto
+
+# Shebang on Linux breaks if CRLF; force LF for shell scripts
+*.sh text eol=lf
+Makefile text eol=lf
