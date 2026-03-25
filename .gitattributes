@@ -1,0 +1,2 @@
+# Keep bash scripts with LF to avoid CRLF breaking `bash`
+*.sh text eol=lf
