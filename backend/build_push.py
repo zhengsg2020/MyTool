@@ -35,8 +35,10 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -87,6 +89,132 @@ def svn_up_cmd_from_config(cfg: dict[str, Any]) -> str:
         "--non-interactive "
         "--trust-server-cert"
     )
+
+
+def is_aliyun_repo(repo_cfg: dict[str, Any]) -> bool:
+    return all(
+        isinstance(repo_cfg.get(k), str) and str(repo_cfg.get(k)).strip()
+        for k in (
+            "ALIYUN_PROJECT_NAME",
+            "ALIYUN_ACCESS_KEY_ID",
+            "ALIYUN_ACCESS_KEY_SECRET",
+            "ALIYUN_REGION_ID",
+            "ALIYUN_URL",
+            "ALIYUN_KEY_STR",
+        )
+    )
+
+
+def _extract_auth_token(payload: Any) -> Optional[str]:
+    if isinstance(payload, dict):
+        for key in ("AuthorizationToken", "authorizationToken"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        for value in payload.values():
+            token = _extract_auth_token(value)
+            if token:
+                return token
+    elif isinstance(payload, list):
+        for item in payload:
+            token = _extract_auth_token(item)
+            if token:
+                return token
+    return None
+
+
+def ensure_aliyun_login(repo_cfg: dict[str, Any], *, dry_run: bool = False) -> None:
+    """
+    参考旧工具流程：
+      1) aliyun configure set
+      2) aliyun cr GetAuthorizationToken 拿临时密码
+      3) docker login 到 ALIYUN_URL
+    """
+    if not is_aliyun_repo(repo_cfg):
+        return
+    if dry_run:
+        print(f"[状态] (dry-run) 跳过阿里云登录: {repo_cfg['ALIYUN_URL']}")
+        return
+    if not shutil.which("aliyun"):
+        raise SystemExit("未检测到 aliyun 命令，请先安装阿里云 CLI 并确保在 PATH 中")
+
+    profile = str(repo_cfg["ALIYUN_PROJECT_NAME"]).strip()
+    region = str(repo_cfg["ALIYUN_REGION_ID"]).strip()
+    ak = str(repo_cfg["ALIYUN_ACCESS_KEY_ID"]).strip()
+    sk = str(repo_cfg["ALIYUN_ACCESS_KEY_SECRET"]).strip()
+    instance_id = str(repo_cfg["ALIYUN_KEY_STR"]).strip()
+    registry = str(repo_cfg["ALIYUN_URL"]).strip()
+
+    print(f"[信息] 阿里云登录准备: profile={profile}, region={region}, registry={registry}")
+
+    cfg_cmd = [
+        "aliyun",
+        "configure",
+        "set",
+        "--profile",
+        profile,
+        "--mode",
+        "AK",
+        "--region",
+        region,
+        "--access-key-id",
+        ak,
+        "--access-key-secret",
+        sk,
+    ]
+    print("[状态] 正在配置阿里云 CLI")
+    subprocess.run(cfg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    token: Optional[str] = None
+    for idx in range(3):
+        print(f"[状态] 正在获取阿里云授权 token（尝试 {idx + 1}/3）")
+        token_cmd = [
+            "aliyun",
+            "cr",
+            "GetAuthorizationToken",
+            "--region",
+            region,
+            "--InstanceId",
+            instance_id,
+            "--version",
+            "2018-12-01",
+            "--force",
+        ]
+        result = subprocess.run(
+            token_cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if result.returncode == 0:
+            try:
+                payload = json.loads(result.stdout)
+                token = _extract_auth_token(payload)
+            except json.JSONDecodeError:
+                token = None
+        if token:
+            break
+        time.sleep(1)
+    if not token:
+        raise SystemExit("获取阿里云镜像仓库授权 token 失败")
+
+    print(f"[状态] 正在登录 Docker 仓库: {registry}")
+    subprocess.run(
+        ["docker", "logout", registry],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    subprocess.run(
+        ["docker", "login", "--username=cr_temp_user", f"--password={token}", registry],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    print(f"[信息] 阿里云仓库登录成功: {registry}")
 
 
 @dataclass
@@ -252,6 +380,7 @@ def build_and_push(
     cfg = load_build_config()
     tag = make_datetime_tag(project_key)
     targets = build_repo_targets(project_key, cfg, only_repo=only_repo)
+    repos_cfg = cfg.get("repositories") if isinstance(cfg.get("repositories"), dict) else {}
     release_dir = release_dir_for_project(project_key)
     if not release_dir.is_dir():
         raise SystemExit(f"构建目录不存在: {release_dir}")
@@ -281,7 +410,14 @@ def build_and_push(
         cwd=release_dir,
     )
 
+    logged_in_repos: set[str] = set()
     for t in targets:
+        repo_cfg = repos_cfg.get(t.key) if isinstance(repos_cfg, dict) else None
+        if isinstance(repo_cfg, dict) and t.key not in logged_in_repos and is_aliyun_repo(repo_cfg):
+            print(f"[状态] 正在登录阿里云仓库 — {t.key}")
+            ensure_aliyun_login(repo_cfg, dry_run=dry_run)
+            logged_in_repos.add(t.key)
+
         image_with_tag = f"{t.full_name}:{tag}"
         print(f"[状态] 正在打标签 — 仓库: {t.key}, 组件: {t.component}")
         run_cmd(

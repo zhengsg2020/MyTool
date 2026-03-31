@@ -323,6 +323,7 @@ async def ws_build(websocket: WebSocket, project_name: str):
 
         # 计算本次所有目标仓库 / 组件
         all_targets = build_push.build_repo_targets(project_name, cfg)
+        repos_cfg = cfg.get("repositories") if isinstance(cfg.get("repositories"), dict) else {}
 
         if selected_set:
             targets = [t for t in all_targets if t.key in selected_set]
@@ -381,7 +382,27 @@ async def ws_build(websocket: WebSocket, project_name: str):
             await websocket.send_text("FAILED")
             return
 
+        logged_in_repos: set[str] = set()
         for t in targets:
+            repo_cfg = repos_cfg.get(t.key) if isinstance(repos_cfg, dict) else None
+            if (
+                isinstance(repo_cfg, dict)
+                and t.key not in logged_in_repos
+                and build_push.is_aliyun_repo(repo_cfg)
+            ):
+                await websocket.send_text(f"[状态] 正在登录阿里云仓库 — {t.key}")
+                try:
+                    build_push.ensure_aliyun_login(repo_cfg, dry_run=False)
+                except Exception as exc:
+                    if not hasattr(exc, "args") or not exc.args:
+                        await websocket.send_text("[ERROR] 阿里云登录失败：未知异常")
+                    else:
+                        await websocket.send_text(f"[ERROR] 阿里云登录失败详情：{exc}")
+                    await websocket.send_text(f"[ERROR] 阿里云登录失败（仓库 {t.key}）：{exc}")
+                    await websocket.send_text("FAILED")
+                    return
+                logged_in_repos.add(t.key)
+
             image_with_tag = f"{t.full_name}:{tag}"
             await websocket.send_text(
                 f"[状态] 正在打标签 — 仓库: {t.key}, 组件: {t.component}"
