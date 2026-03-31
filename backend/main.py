@@ -352,7 +352,13 @@ async def ws_build(websocket: WebSocket, project_name: str):
             project_name,
             "/bin/bash",
             "-lc",
-            f"cd {project_name} && ./run_build.sh",
+            (
+                f"cd {project_name} && "
+                f"{build_push.svn_up_cmd_from_config(cfg)} && "
+                "python script/py/init.py && "
+                "./vs.sh && "
+                "./BuildRelease.sh"
+            ),
         ]
         await websocket.send_text(f"$ {' '.join(compile_cmd)}")
         rc = await stream_command(websocket, compile_cmd)

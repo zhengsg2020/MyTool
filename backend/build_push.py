@@ -29,12 +29,12 @@ from __future__ import annotations
 
 可选参数：
   --only-repo NAME   只针对某个仓库键执行（例如 185_lnp_trunk）
-  --build-script     容器内编译脚本（默认 ./run_build.sh）
   --dry-run          只打印将要执行的 docker 命令，不真正执行
 """
 
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -62,6 +62,31 @@ def load_build_config(path: Path = BUILD_CONFIG_PATH) -> dict[str, Any]:
         return data
     except Exception as e:
         raise SystemExit(f"读取配置失败: {path} ({type(e).__name__}: {e})")
+
+
+def svn_up_cmd_from_config(cfg: dict[str, Any]) -> str:
+    """
+    根据 config.build 中的 svn 配置生成 svn up 命令。
+    若未配置账号密码，则返回普通 svn up。
+    """
+    svn_cfg = cfg.get("svn")
+    if not isinstance(svn_cfg, dict):
+        return "svn up"
+    username = svn_cfg.get("username")
+    password = svn_cfg.get("password")
+    if not isinstance(username, str) or not username.strip():
+        return "svn up"
+    if not isinstance(password, str) or not password.strip():
+        return "svn up"
+    u = shlex.quote(username.strip())
+    p = shlex.quote(password.strip())
+    return (
+        "svn up "
+        f"--username {u} "
+        f"--password {p} "
+        "--non-interactive "
+        "--trust-server-cert"
+    )
 
 
 @dataclass
@@ -194,20 +219,25 @@ def release_dir_for_project(project_key: str) -> Path:
 def compile_project_in_container(
     project_key: str,
     *,
-    build_script: str,
+    cfg: dict[str, Any],
     dry_run: bool,
 ) -> None:
     # 对齐人工流程：
     # docker exec -it {项目名} /bin/bash
     # cd {项目名}
-    # ./run_build.sh
+    # svn up
+    # python script/py/init.py
+    # ./vs.sh
+    # ./BuildRelease.sh
+    svn_up_cmd = svn_up_cmd_from_config(cfg)
+    compile_steps = f"{svn_up_cmd} && python script/py/init.py && ./vs.sh && ./BuildRelease.sh"
     cmd = [
         "docker",
         "exec",
         project_key,
         "/bin/bash",
         "-lc",
-        f"cd {project_key} && {build_script}",
+        f"cd {project_key} && {compile_steps}",
     ]
     print("[状态] 正在编译（容器内）")
     run_cmd(cmd, dry_run=dry_run)
@@ -217,7 +247,6 @@ def build_and_push(
     project_key: str,
     *,
     only_repo: Optional[str] = None,
-    build_script: str = "./run_build.sh",
     dry_run: bool = False,
 ) -> None:
     cfg = load_build_config()
@@ -234,7 +263,7 @@ def build_and_push(
 
     compile_project_in_container(
         project_key,
-        build_script=build_script,
+        cfg=cfg,
         dry_run=dry_run,
     )
 
@@ -291,11 +320,6 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="只处理指定仓库键（可选），例如 185_lnp_trunk",
     )
     p.add_argument(
-        "--build-script",
-        default="./run_build.sh",
-        help="容器内编译脚本，默认 ./run_build.sh",
-    )
-    p.add_argument(
         "--dry-run",
         action="store_true",
         help="仅打印 docker 命令，不实际执行",
@@ -309,7 +333,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         build_and_push(
             project_key=args.project,
             only_repo=args.only_repo,
-            build_script=args.build_script,
             dry_run=args.dry_run,
         )
         return 0

@@ -20,8 +20,12 @@ def venv_python() -> Path:
 
 def ensure_venv() -> Path:
     exe = venv_python()
-    if exe.is_file():
+    cfg = ROOT / ".venv" / "pyvenv.cfg"
+    if exe.is_file() and cfg.is_file():
         return exe
+    # .venv 目录存在但结构不完整（例如清理中断导致 pyvenv.cfg 丢失）时，先清掉再重建
+    if (ROOT / ".venv").exists():
+        shutil.rmtree(ROOT / ".venv", ignore_errors=True)
     subprocess.run([sys.executable, "-m", "venv", str(ROOT / ".venv")], check=True)
     if not exe.is_file():
         raise SystemExit("Failed to create .venv")
@@ -91,11 +95,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         env["PORT"] = str(args.port)
     else:
         env.pop("PORT", None)
-    return subprocess.run(
-        [str(py), str(ROOT / "backend" / "run_server.py")],
-        cwd=ROOT / "backend",
-        env=env,
-    ).returncode
+    try:
+        return subprocess.run(
+            [str(py), str(ROOT / "backend" / "run_server.py")],
+            cwd=ROOT / "backend",
+            env=env,
+        ).returncode
+    except KeyboardInterrupt:
+        # 用户主动 Ctrl+C 时，返回标准中断退出码，避免打印 traceback。
+        print("\n[INFO] 服务已停止。")
+        return 130
 
 
 def cmd_clean(args: argparse.Namespace) -> int:
