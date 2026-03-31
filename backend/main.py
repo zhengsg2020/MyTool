@@ -41,8 +41,13 @@ def frontend_dist_dir() -> Path:
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", runtime_root() / "config.json"))
 DEFAULT_BUILD_CONFIG_PATH = runtime_root() / "config" / "build" / "config.json"
 DEFAULT_SITES_CONFIG_PATH = runtime_root() / "config" / "sites" / "sites.json"
+BUILD_LOG_PATH = runtime_root() / "logs" / "build.log"
+BUILD_HISTORY_PATH = runtime_root() / "logs" / "build_history.json"
 
 app = FastAPI(title="Docker Build Publisher")
+BUILD_LOCK = asyncio.Lock()
+BUILD_CANCEL_EVENT = asyncio.Event()
+RUNNING_PROCS: set[asyncio.subprocess.Process] = set()
 
 _cors = os.environ.get("CORS_ORIGINS", "").strip()
 if _cors:
@@ -123,6 +128,40 @@ def save_json_file(path: Path, data: Any) -> None:
         json.dump(data, f, ensure_ascii=False, indent=4)
         f.write("\n")
     os.replace(tmp_path, path)
+
+
+def append_build_log(line: str) -> None:
+    BUILD_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with BUILD_LOG_PATH.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(f"[{stamp}] {line}\n")
+
+
+def read_build_log_lines(limit: int = 300) -> list[str]:
+    if not BUILD_LOG_PATH.is_file():
+        return []
+    try:
+        with BUILD_LOG_PATH.open(encoding="utf-8") as f:
+            lines = [x.rstrip("\n\r") for x in f.readlines()]
+        return lines[-limit:]
+    except OSError:
+        return []
+
+
+def read_build_history(limit: int = 200) -> list[dict[str, str]]:
+    data = load_json_file(BUILD_HISTORY_PATH, [])
+    if not isinstance(data, list):
+        return []
+    items = [x for x in data if isinstance(x, dict)]
+    return items[-limit:][::-1]
+
+
+def append_build_history(entry: dict[str, str]) -> None:
+    data = load_json_file(BUILD_HISTORY_PATH, [])
+    if not isinstance(data, list):
+        data = []
+    data.append(entry)
+    save_json_file(BUILD_HISTORY_PATH, data[-500:])
 
 
 def _resolve_config_ref(value: Any, default_path: Path) -> Path:
@@ -211,6 +250,7 @@ async def stream_command(
     cwd: str | None = None,
     prefix: str = "",
     compact_docker_push: bool = False,
+    persist_log: bool = True,
 ) -> int:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -219,11 +259,18 @@ async def stream_command(
         cwd=cwd,
     )
     assert proc.stdout is not None
+    RUNNING_PROCS.add(proc)
     waiting_layers: set[str] = set()
     pushed_layers: set[str] = set()
     last_progress_text = ""
 
     while True:
+        if BUILD_CANCEL_EVENT.is_set():
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            break
         line = await proc.stdout.readline()
         if not line:
             break
@@ -245,6 +292,8 @@ async def stream_command(
                     )
                     if progress != last_progress_text:
                         await websocket.send_text(progress)
+                        if persist_log:
+                            append_build_log(progress)
                         last_progress_text = progress
                     continue
                 if layer_id and status.startswith("Pushed"):
@@ -255,14 +304,34 @@ async def stream_command(
                     )
                     if progress != last_progress_text:
                         await websocket.send_text(progress)
+                        if persist_log:
+                            append_build_log(progress)
                         last_progress_text = progress
                     continue
 
         if prefix:
             raw = f"{prefix}{raw}"
         await websocket.send_text(raw)
+        if persist_log:
+            append_build_log(raw)
     await proc.wait()
+    RUNNING_PROCS.discard(proc)
+    if BUILD_CANCEL_EVENT.is_set():
+        return 130
     return proc.returncode or 0
+
+
+@app.post("/api/build/cancel")
+async def cancel_build():
+    if not BUILD_LOCK.locked():
+        return {"ok": True, "message": "当前没有运行中的构建任务"}
+    BUILD_CANCEL_EVENT.set()
+    for p in list(RUNNING_PROCS):
+        try:
+            p.terminate()
+        except ProcessLookupError:
+            continue
+    return {"ok": True, "message": "已发送终止信号"}
 
 
 @app.get("/api/projects")
@@ -297,6 +366,16 @@ async def list_project_repositories(project_name: str):
         if isinstance(key, str) and key:
             result.append(key)
     return result
+
+
+@app.get("/api/build/log")
+async def get_build_log():
+    return read_build_log_lines()
+
+
+@app.get("/api/build/history")
+async def get_build_history():
+    return read_build_history()
 
 
 @app.get("/api/sites", response_model=list[SiteOut])
@@ -343,7 +422,21 @@ async def delete_site(site_id: str):
 @app.websocket("/ws/build/{project_name}")
 async def ws_build(websocket: WebSocket, project_name: str):
     await websocket.accept()
+    if BUILD_LOCK.locked():
+        await websocket.send_text("[ERROR] 当前已有构建任务在执行，请稍后再试。")
+        await websocket.send_text("FAILED")
+        return
+
+    await BUILD_LOCK.acquire()
+    BUILD_CANCEL_EVENT.clear()
     try:
+        client_ip = websocket.client.host if websocket.client else ""
+
+        async def emit(text: str) -> None:
+            await websocket.send_text(text)
+            if text not in ("SUCCESS", "FAILED"):
+                append_build_log(text)
+
         # 解析前端勾选的仓库键（逗号分隔）
         raw = websocket.query_params.get("repos", "")
         selected_repos = [x for x in raw.split(",") if x.strip()]
@@ -352,8 +445,8 @@ async def ws_build(websocket: WebSocket, project_name: str):
         cfg = build_push.load_build_config()
         projects = cfg.get("projects") or {}
         if not isinstance(projects, dict) or project_name not in projects:
-            await websocket.send_text(f"[ERROR] 未知项目: {project_name}")
-            await websocket.send_text("FAILED")
+            await emit(f"[ERROR] 未知项目: {project_name}")
+            await emit("FAILED")
             return
 
         # 计算本次所有目标仓库 / 组件
@@ -366,22 +459,22 @@ async def ws_build(websocket: WebSocket, project_name: str):
             targets = all_targets
 
         if not targets:
-            await websocket.send_text("[ERROR] 未选择任何有效仓库")
-            await websocket.send_text("FAILED")
+            await emit("[ERROR] 未选择任何有效仓库")
+            await emit("FAILED")
             return
 
         # 构建目录：~/{项目名}_home/{项目名}/x64_Env/LinuxRelease
         release_dir = build_push.release_dir_for_project(project_name)
-        await websocket.send_text(f"[状态] 准备中 — 项目: {project_name}")
-        await websocket.send_text(f"[信息] 发布目录: {release_dir}")
-        await websocket.send_text(f"[信息] 目标仓库: {', '.join(sorted({t.key for t in targets}))}")
+        await emit(f"[状态] 准备中 — 项目: {project_name}")
+        await emit(f"[信息] 发布目录: {release_dir}")
+        await emit(f"[信息] 目标仓库: {', '.join(sorted({t.key for t in targets}))}")
 
         if not release_dir.is_dir():
-            await websocket.send_text(f"[ERROR] 构建目录不存在: {release_dir}")
-            await websocket.send_text("FAILED")
+            await emit(f"[ERROR] 构建目录不存在: {release_dir}")
+            await emit("FAILED")
             return
 
-        await websocket.send_text("[状态] 正在编译（容器内）")
+        await emit("[状态] 正在编译（容器内）")
         compile_cmd = [
             "docker",
             "exec",
@@ -396,25 +489,33 @@ async def ws_build(websocket: WebSocket, project_name: str):
                 "./BuildRelease.sh"
             ),
         ]
-        await websocket.send_text(f"$ {' '.join(compile_cmd)}")
+        await emit(f"$ {' '.join(compile_cmd)}")
         rc = await stream_command(websocket, compile_cmd)
         if rc != 0:
-            await websocket.send_text(f"[ERROR] 编译失败，退出码: {rc}")
-            await websocket.send_text("FAILED")
+            if rc == 130:
+                await emit("[WARN] 构建已被手动终止。")
+                await emit("FAILED")
+                return
+            await emit(f"[ERROR] 编译失败，退出码: {rc}")
+            await emit("FAILED")
             return
 
         tag = build_push.make_datetime_tag(project_name)
-        await websocket.send_text("[状态] 正在生成版本号")
-        await websocket.send_text(f"[信息] 本次 Tag: {tag}")
+        await emit("[状态] 正在生成版本号")
+        await emit(f"[信息] 本次 Tag: {tag}")
 
         local_image = f"{project_name}:{tag}"
-        await websocket.send_text(f"[状态] 正在打包本地镜像 — {local_image}")
+        await emit(f"[状态] 正在打包本地镜像 — {local_image}")
         local_build_cmd = ["docker", "build", "-t", local_image, "."]
-        await websocket.send_text(f"$ cd {release_dir} && {' '.join(local_build_cmd)}")
+        await emit(f"$ cd {release_dir} && {' '.join(local_build_cmd)}")
         rc = await stream_command(websocket, local_build_cmd, cwd=str(release_dir))
         if rc != 0:
-            await websocket.send_text(f"[ERROR] 本地镜像打包失败，退出码: {rc}")
-            await websocket.send_text("FAILED")
+            if rc == 130:
+                await emit("[WARN] 构建已被手动终止。")
+                await emit("FAILED")
+                return
+            await emit(f"[ERROR] 本地镜像打包失败，退出码: {rc}")
+            await emit("FAILED")
             return
 
         logged_in_repos: set[str] = set()
@@ -425,21 +526,21 @@ async def ws_build(websocket: WebSocket, project_name: str):
                 and t.key not in logged_in_repos
                 and build_push.is_aliyun_repo(repo_cfg)
             ):
-                await websocket.send_text(f"[状态] 正在登录阿里云仓库 — {t.key}")
+                await emit(f"[状态] 正在登录阿里云仓库 — {t.key}")
                 try:
                     build_push.ensure_aliyun_login(repo_cfg, dry_run=False)
                 except Exception as exc:
                     if not hasattr(exc, "args") or not exc.args:
-                        await websocket.send_text("[ERROR] 阿里云登录失败：未知异常")
+                        await emit("[ERROR] 阿里云登录失败：未知异常")
                     else:
-                        await websocket.send_text(f"[ERROR] 阿里云登录失败详情：{exc}")
-                    await websocket.send_text(f"[ERROR] 阿里云登录失败（仓库 {t.key}）：{exc}")
-                    await websocket.send_text("FAILED")
+                        await emit(f"[ERROR] 阿里云登录失败详情：{exc}")
+                    await emit(f"[ERROR] 阿里云登录失败（仓库 {t.key}）：{exc}")
+                    await emit("FAILED")
                     return
                 logged_in_repos.add(t.key)
 
             image_with_tag = f"{t.full_name}:{tag}"
-            await websocket.send_text(
+            await emit(
                 f"[状态] 正在打标签 — 仓库: {t.key}, 组件: {t.component}"
             )
             tag_cmd = [
@@ -448,59 +549,78 @@ async def ws_build(websocket: WebSocket, project_name: str):
                 local_image,
                 image_with_tag,
             ]
-            await websocket.send_text(f"$ {' '.join(tag_cmd)}")
+            await emit(f"$ {' '.join(tag_cmd)}")
             rc = await stream_command(websocket, tag_cmd)
             if rc != 0:
-                await websocket.send_text(
+                if rc == 130:
+                    await emit("[WARN] 构建已被手动终止。")
+                    await emit("FAILED")
+                    return
+                await emit(
                     f"[ERROR] docker tag 失败（仓库 {t.key} 组件 {t.component}），退出码: {rc}"
                 )
-                await websocket.send_text("FAILED")
+                await emit("FAILED")
                 return
 
-            await websocket.send_text(f"[状态] 正在推送镜像 — {image_with_tag}")
+            await emit(f"[状态] 正在推送镜像 — {image_with_tag}")
             push_cmd = ["docker", "push", image_with_tag]
             push_ok = False
             for attempt in range(1, 4):
-                await websocket.send_text(f"[状态] 推送尝试 {attempt}/3")
-                await websocket.send_text(f"$ {' '.join(push_cmd)}")
+                await emit(f"[状态] 推送尝试 {attempt}/3")
+                await emit(f"$ {' '.join(push_cmd)}")
                 rc = await stream_command(websocket, push_cmd, compact_docker_push=True)
                 if rc == 0:
                     push_ok = True
                     break
+                if rc == 130:
+                    await emit("[WARN] 构建已被手动终止。")
+                    await emit("FAILED")
+                    return
                 if attempt < 3:
-                    await websocket.send_text(
+                    await emit(
                         f"[WARN] docker push 失败（退出码: {rc}），准备重试..."
                     )
                     if (
                         isinstance(repo_cfg, dict)
                         and build_push.is_aliyun_repo(repo_cfg)
                     ):
-                        await websocket.send_text(
+                        await emit(
                             f"[状态] 推送失败后重新登录阿里云仓库 — {t.key}"
                         )
                         try:
                             build_push.ensure_aliyun_login(repo_cfg, dry_run=False)
                         except Exception as exc:
-                            await websocket.send_text(
+                            await emit(
                                 f"[ERROR] 阿里云重登录失败（仓库 {t.key}）：{exc}"
                             )
-                            await websocket.send_text("FAILED")
+                            await emit("FAILED")
                             return
                     await asyncio.sleep(attempt * 2)
             if not push_ok:
-                await websocket.send_text(
+                await emit(
                     f"[ERROR] docker push 失败（仓库 {t.key} 组件 {t.component}），已重试 3 次"
                 )
-                await websocket.send_text("FAILED")
+                await emit("FAILED")
                 return
+            append_build_history(
+                {
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ip": client_ip,
+                    "image": image_with_tag,
+                    "repository": t.key,
+                }
+            )
 
-        await websocket.send_text("[状态] 推送成功 — 所有选中仓库")
-        await websocket.send_text("SUCCESS")
+        await emit("[状态] 推送成功 — 所有选中仓库")
+        await emit("SUCCESS")
     except WebSocketDisconnect:
         raise
     except Exception as e:
         await websocket.send_text(f"[ERROR] {type(e).__name__}: {e}")
         await websocket.send_text("FAILED")
+    finally:
+        if BUILD_LOCK.locked():
+            BUILD_LOCK.release()
 
 
 _dist = frontend_dist_dir()

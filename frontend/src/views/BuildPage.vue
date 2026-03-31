@@ -7,6 +7,7 @@ const selected = ref("");
 const repoOptions = ref([]);
 const selectedRepos = ref([]);
 const logLines = ref([]);
+const buildHistory = ref([]);
 const wsConnected = ref(false);
 const building = ref(false);
 const finishedOk = ref(null);
@@ -77,6 +78,28 @@ async function fetchProjects() {
   }
 }
 
+async function fetchSavedLog() {
+  try {
+    const r = await fetch("/api/build/log");
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    logLines.value = Array.isArray(data) ? data : [];
+  } catch (e) {
+    ElMessage.error("加载历史日志失败: " + e.message);
+  }
+}
+
+async function fetchBuildHistory() {
+  try {
+    const r = await fetch("/api/build/history");
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    buildHistory.value = Array.isArray(data) ? data : [];
+  } catch (e) {
+    ElMessage.error("加载构建记录失败: " + e.message);
+  }
+}
+
 async function fetchReposForSelected() {
   repoOptions.value = [];
   selectedRepos.value = [];
@@ -135,6 +158,7 @@ function startBuild() {
       building.value = false;
       disconnect();
       ElMessage.success("构建与推送完成");
+      fetchBuildHistory();
       return;
     }
     if (text === "FAILED") {
@@ -167,7 +191,21 @@ function startBuild() {
   };
 }
 
-onMounted(fetchProjects);
+async function cancelBuild() {
+  if (!building.value) return;
+  try {
+    const r = await fetch("/api/build/cancel", { method: "POST" });
+    if (!r.ok) throw new Error(await r.text());
+    appendLog("[WARN] 已请求终止构建，正在停止...");
+    ElMessage.warning("已发送终止请求");
+  } catch (e) {
+    ElMessage.error("终止构建失败: " + e.message);
+  }
+}
+
+onMounted(async () => {
+  await Promise.all([fetchProjects(), fetchSavedLog(), fetchBuildHistory()]);
+});
 </script>
 
 <template>
@@ -219,10 +257,22 @@ onMounted(fetchProjects);
         <el-button size="small" :disabled="building || !selected" @click="startBuild">
           重新构建
         </el-button>
+        <el-button size="small" type="danger" :disabled="!building" @click="cancelBuild">
+          终止构建
+        </el-button>
       </div>
       <div ref="logRef" class="console">
         <div v-for="(line, i) in logLines" :key="i" class="line">{{ line }}</div>
         <div v-if="!logLines.length" class="placeholder">日志将显示在此处...</div>
+      </div>
+      <div class="history">
+        <div class="history-title">构建记录</div>
+        <el-table :data="buildHistory" size="small" height="220">
+          <el-table-column prop="time" label="时间" min-width="160" />
+          <el-table-column prop="ip" label="IP" min-width="120" />
+          <el-table-column prop="image" label="镜像名" min-width="260" show-overflow-tooltip />
+          <el-table-column prop="repository" label="仓库名" min-width="120" />
+        </el-table>
       </div>
     </el-main>
   </el-container>
@@ -311,6 +361,16 @@ onMounted(fetchProjects);
   line-height: 1.5;
   color: #a6e3a1;
   background: #0d0d12;
+}
+.history {
+  border-top: 1px solid #313244;
+  background: #11111b;
+  padding: 10px 12px 12px;
+}
+.history-title {
+  color: #cdd6f4;
+  font-size: 13px;
+  margin-bottom: 8px;
 }
 .line {
   white-space: pre-wrap;
