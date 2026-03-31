@@ -50,6 +50,7 @@ Desktop.ini
 
 # --- Project config ---
 # config 目录全部保留。
+/config/sites/sites.json
 
 # --- Runtime artifacts ---
 /service.log
