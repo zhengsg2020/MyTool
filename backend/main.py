@@ -210,6 +210,7 @@ async def stream_command(
     *,
     cwd: str | None = None,
     prefix: str = "",
+    compact_docker_push: bool = False,
 ) -> int:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -218,14 +219,48 @@ async def stream_command(
         cwd=cwd,
     )
     assert proc.stdout is not None
+    waiting_layers: set[str] = set()
+    pushed_layers: set[str] = set()
+    last_progress_text = ""
+
     while True:
         line = await proc.stdout.readline()
         if not line:
             break
         text = line.decode(errors="replace")
+        raw = text.rstrip("\n\r")
+
+        # 压缩 docker push 的 Waiting 刷屏，改成进度摘要日志
+        if compact_docker_push:
+            # 示例: a6aba25925bc: Waiting
+            if ":" in raw:
+                layer_id, status = raw.split(":", 1)
+                layer_id = layer_id.strip()
+                status = status.strip()
+                if layer_id and status == "Waiting":
+                    waiting_layers.add(layer_id)
+                    progress = (
+                        f"[进度] docker push 等待中: {len(waiting_layers)} 层"
+                        f" | 已完成: {len(pushed_layers)} 层"
+                    )
+                    if progress != last_progress_text:
+                        await websocket.send_text(progress)
+                        last_progress_text = progress
+                    continue
+                if layer_id and status.startswith("Pushed"):
+                    pushed_layers.add(layer_id)
+                    progress = (
+                        f"[进度] docker push 进行中: 已完成 {len(pushed_layers)} 层"
+                        f" | 等待 {len(waiting_layers)} 层"
+                    )
+                    if progress != last_progress_text:
+                        await websocket.send_text(progress)
+                        last_progress_text = progress
+                    continue
+
         if prefix:
-            text = f"{prefix}{text}"
-        await websocket.send_text(text.rstrip("\n\r"))
+            raw = f"{prefix}{raw}"
+        await websocket.send_text(raw)
     await proc.wait()
     return proc.returncode or 0
 
@@ -425,7 +460,7 @@ async def ws_build(websocket: WebSocket, project_name: str):
             await websocket.send_text(f"[状态] 正在推送镜像 — {image_with_tag}")
             push_cmd = ["docker", "push", image_with_tag]
             await websocket.send_text(f"$ {' '.join(push_cmd)}")
-            rc = await stream_command(websocket, push_cmd)
+            rc = await stream_command(websocket, push_cmd, compact_docker_push=True)
             if rc != 0:
                 await websocket.send_text(
                     f"[ERROR] docker push 失败（仓库 {t.key} 组件 {t.component}），退出码: {rc}"
