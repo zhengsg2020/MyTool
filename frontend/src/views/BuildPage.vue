@@ -4,6 +4,8 @@ import { ElMessage } from "element-plus";
 
 const projects = ref([]);
 const selected = ref("");
+const repoOptions = ref([]);
+const selectedRepos = ref([]);
 const logLines = ref([]);
 const wsConnected = ref(false);
 const building = ref(false);
@@ -68,9 +70,28 @@ async function fetchProjects() {
     projects.value = await r.json();
     if (projects.value.length && !selected.value) {
       selected.value = projects.value[0];
+      await fetchReposForSelected();
     }
   } catch (e) {
     ElMessage.error("获取项目列表失败: " + e.message);
+  }
+}
+
+async function fetchReposForSelected() {
+  repoOptions.value = [];
+  selectedRepos.value = [];
+  if (!selected.value) return;
+  try {
+    const r = await fetch(
+      `/api/projects/${encodeURIComponent(selected.value)}/repositories`
+    );
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    repoOptions.value = Array.isArray(data) ? data : [];
+    // 默认全选
+    selectedRepos.value = [...repoOptions.value];
+  } catch (e) {
+    ElMessage.error("获取仓库列表失败: " + e.message);
   }
 }
 
@@ -87,6 +108,10 @@ function startBuild() {
     ElMessage.warning("请先选择项目");
     return;
   }
+  if (!selectedRepos.value.length) {
+    ElMessage.warning("请至少勾选一个仓库");
+    return;
+  }
   disconnect();
   clearLog();
   building.value = true;
@@ -95,7 +120,10 @@ function startBuild() {
 
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host;
-  const url = `${proto}//${host}/ws/build/${encodeURIComponent(selected.value)}`;
+  const reposParam = encodeURIComponent(selectedRepos.value.join(","));
+  const url = `${proto}//${host}/ws/build/${encodeURIComponent(
+    selected.value
+  )}?repos=${reposParam}`;
   socket = new WebSocket(url);
   wsConnected.value = true;
 
@@ -152,9 +180,25 @@ onMounted(fetchProjects);
         class="project-select"
         filterable
         :disabled="building"
+        @change="fetchReposForSelected"
       >
         <el-option v-for="p in projects" :key="p" :label="p" :value="p" />
       </el-select>
+      <div class="aside-subtitle">上传到仓库</div>
+      <el-checkbox-group
+        v-model="selectedRepos"
+        class="repo-group"
+        :disabled="building || !selected"
+      >
+        <el-checkbox
+          v-for="r in repoOptions"
+          :key="r"
+          :label="r"
+          class="repo-checkbox"
+        >
+          {{ r }}
+        </el-checkbox>
+      </el-checkbox-group>
       <el-button
         type="primary"
         class="btn-build"
@@ -200,9 +244,23 @@ onMounted(fetchProjects);
   margin-bottom: 12px;
   font-size: 14px;
 }
+.aside-subtitle {
+  font-weight: 500;
+  margin: 12px 0 8px;
+  font-size: 13px;
+}
 .project-select {
   width: 100%;
   margin-bottom: 12px;
+}
+.repo-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.repo-checkbox {
+  margin-left: 0;
 }
 .btn-build {
   width: 100%;

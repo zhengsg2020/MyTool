@@ -19,6 +19,10 @@ htmlcov/
 # 根目录构建缓存（若以后有其他打包工具）
 build/
 dist/
+!/config/build/
+!/config/build/*.json
+/config/build/config.json
+!/config/build/config.example.json
 
 # --- Node / frontend ---
 frontend/node_modules/
@@ -45,5 +49,9 @@ Desktop.ini
 *~
 
 # --- Project config ---
-# `config.json` 与 `config/build/` 纳入版本管理；网站记录仅本地生成，不入库。
-/config/sites/
+# config 目录全部保留。
+
+# --- Runtime artifacts ---
+/service.log
+/service.pid
+/frontend/package-lock.json

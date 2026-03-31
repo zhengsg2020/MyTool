@@ -1,0 +1,37 @@
+{
+    "projects": {
+        "lnp_trunk": {
+            "image_name": "lnp_trunk",
+            "repositories": ["185_lnp_trunk", "dragon_stg"]
+        },
+        "lnp_dev": {
+            "image_name": "lnp_dev",
+            "repositories": ["185_lnp_dev"]
+        }
+    },
+    "repositories": {
+        "185_lnp_trunk": {
+            "ip": "192.168.1.185:5005/dragon",
+            "gs_image_name": "lnp_trunk",
+            "logic_image_name": "logic",
+            "gate_image_name": "gate"
+        },
+        "185_lnp_dev": {
+            "ip": "192.168.1.185:5005/dragon",
+            "gs_image_name": "lnp_dev",
+            "logic_image_name": "logic",
+            "gate_image_name": "gate"
+        },
+        "dragon_stg": {
+            "ALIYUN_PROJECT_NAME": "dragon",
+            "ALIYUN_ACCESS_KEY_ID": "<your-access-key-id>",
+            "ALIYUN_ACCESS_KEY_SECRET": "<your-access-key-secret>",
+            "ALIYUN_REGION_ID": "ap-northeast-1",
+            "ALIYUN_URL": "g123-jp-stg-registry.ap-northeast-1.cr.aliyuncs.com",
+            "ALIYUN_KEY_STR": "<your-registry-key>",
+            "gs_image_name": "maiddragon",
+            "logic_image_name": "logic",
+            "gate_image_name": "gate"
+        }
+    }
+}

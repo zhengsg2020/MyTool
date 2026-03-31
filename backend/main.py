@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import sys
 import uuid
 from datetime import datetime
@@ -15,6 +14,13 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
+
+try:
+    # 作为包导入时（例如 backend.main）
+    from . import build_push  # type: ignore
+except ImportError:  # pragma: no cover
+    # 作为脚本模块导入时（例如直接 main）
+    import build_push  # type: ignore
 
 
 def runtime_root() -> Path:
@@ -198,10 +204,6 @@ class SiteOut(BaseModel):
     created_at: str
 
 
-def apply_template(tpl: str, name: str) -> str:
-    return tpl.replace("{name}", name)
-
-
 async def stream_command(
     websocket: WebSocket,
     cmd: list[str],
@@ -228,35 +230,38 @@ async def stream_command(
     return proc.returncode or 0
 
 
-async def get_next_tag(image_repo: str, websocket: WebSocket) -> str:
-    day = datetime.now().strftime("%y%m%d")
-    pattern = re.compile(rf"^{re.escape(day)}_(\d{{4}})$")
-    proc = await asyncio.create_subprocess_exec(
-        "docker",
-        "images",
-        image_repo,
-        "--format",
-        "{{.Tag}}",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    assert proc.stdout is not None
-    out = (await proc.stdout.read()).decode(errors="replace")
-    await proc.wait()
-    max_seq = 0
-    for line in out.splitlines():
-        line = line.strip()
-        m = pattern.match(line)
-        if m:
-            max_seq = max(max_seq, int(m.group(1)))
-    next_seq = max_seq + 1
-    return f"{day}_{next_seq:04d}"
-
-
 @app.get("/api/projects")
 async def list_projects():
-    cfg = load_config()
-    return cfg.get("projects", [])
+    # 返回项目 key 列表，保持与旧前端兼容
+    cfg = build_push.load_build_config()
+    projects = cfg.get("projects") or {}
+    if not isinstance(projects, dict):
+        return []
+    return list(projects.keys())
+
+
+@app.get("/api/projects/{project_name}/repositories")
+async def list_project_repositories(project_name: str):
+    """
+    返回某项目可用的仓库键列表，供前端勾选。
+    只返回诸如 "185_lnp_trunk"、"dragon_stg" 这样的 key，不暴露 ip 等信息。
+    """
+    cfg = build_push.load_build_config()
+    projects = cfg.get("projects") or {}
+    if not isinstance(projects, dict) or project_name not in projects:
+        raise HTTPException(status_code=404, detail="未知项目")
+    project = projects[project_name]
+    if not isinstance(project, dict):
+        raise HTTPException(status_code=500, detail="项目配置格式错误")
+    repo_keys = project.get("repositories") or []
+    if not isinstance(repo_keys, list):
+        raise HTTPException(status_code=500, detail="项目 repositories 配置错误")
+
+    result: list[str] = []
+    for key in repo_keys:
+        if isinstance(key, str) and key:
+            result.append(key)
+    return result
 
 
 @app.get("/api/sites", response_model=list[SiteOut])
@@ -304,64 +309,104 @@ async def delete_site(site_id: str):
 async def ws_build(websocket: WebSocket, project_name: str):
     await websocket.accept()
     try:
-        cfg = load_config()
-        projects = cfg.get("projects", [])
-        if project_name not in projects:
+        # 解析前端勾选的仓库键（逗号分隔）
+        raw = websocket.query_params.get("repos", "")
+        selected_repos = [x for x in raw.split(",") if x.strip()]
+        selected_set = set(selected_repos)
+
+        cfg = build_push.load_build_config()
+        projects = cfg.get("projects") or {}
+        if not isinstance(projects, dict) or project_name not in projects:
             await websocket.send_text(f"[ERROR] 未知项目: {project_name}")
             await websocket.send_text("FAILED")
             return
 
-        tpl = cfg["common_template"]
-        container = tpl["container_name"]
-        build_script = tpl["build_script"]
-        docker_work_dir = apply_template(tpl["docker_work_dir_tpl"], project_name)
-        host_release_dir = apply_template(tpl["host_release_dir_tpl"], project_name)
-        image_repo = apply_template(tpl["image_repo_tpl"], project_name)
+        # 计算本次所有目标仓库 / 组件
+        all_targets = build_push.build_repo_targets(project_name, cfg)
 
+        if selected_set:
+            targets = [t for t in all_targets if t.key in selected_set]
+        else:
+            targets = all_targets
+
+        if not targets:
+            await websocket.send_text("[ERROR] 未选择任何有效仓库")
+            await websocket.send_text("FAILED")
+            return
+
+        # 构建目录：~/{项目名}_home/{项目名}/x64_Env/LinuxRelease
+        release_dir = build_push.release_dir_for_project(project_name)
         await websocket.send_text(f"[状态] 准备中 — 项目: {project_name}")
-        await websocket.send_text(f"[信息] 容器工作目录: {docker_work_dir}")
-        await websocket.send_text(f"[信息] 宿主机发布目录: {host_release_dir}")
-        await websocket.send_text(f"[信息] 镜像仓库: {image_repo}")
+        await websocket.send_text(f"[信息] 发布目录: {release_dir}")
+        await websocket.send_text(f"[信息] 目标仓库: {', '.join(sorted({t.key for t in targets}))}")
+
+        if not release_dir.is_dir():
+            await websocket.send_text(f"[ERROR] 构建目录不存在: {release_dir}")
+            await websocket.send_text("FAILED")
+            return
 
         await websocket.send_text("[状态] 正在编译（容器内）")
-        exec_cmd = [
+        compile_cmd = [
             "docker",
             "exec",
-            "-w",
-            docker_work_dir,
-            container,
-            build_script,
+            project_name,
+            "/bin/bash",
+            "-lc",
+            f"cd {project_name} && ./run_build.sh",
         ]
-        await websocket.send_text(f"$ {' '.join(exec_cmd)}")
-        rc = await stream_command(websocket, exec_cmd)
+        await websocket.send_text(f"$ {' '.join(compile_cmd)}")
+        rc = await stream_command(websocket, compile_cmd)
         if rc != 0:
             await websocket.send_text(f"[ERROR] 编译失败，退出码: {rc}")
             await websocket.send_text("FAILED")
             return
 
+        tag = build_push.make_datetime_tag()
         await websocket.send_text("[状态] 正在生成版本号")
-        tag = await get_next_tag(image_repo, websocket)
         await websocket.send_text(f"[信息] 本次 Tag: {tag}")
 
-        await websocket.send_text("[状态] 正在打包镜像")
-        build_cmd = ["docker", "build", "-t", f"{image_repo}:{tag}", "."]
-        await websocket.send_text(f"$ cd {host_release_dir} && {' '.join(build_cmd)}")
-        rc = await stream_command(websocket, build_cmd, cwd=host_release_dir)
+        local_image = f"{project_name}:{tag}"
+        await websocket.send_text(f"[状态] 正在打包本地镜像 — {local_image}")
+        local_build_cmd = ["docker", "build", "-t", local_image, "."]
+        await websocket.send_text(f"$ cd {release_dir} && {' '.join(local_build_cmd)}")
+        rc = await stream_command(websocket, local_build_cmd, cwd=str(release_dir))
         if rc != 0:
-            await websocket.send_text(f"[ERROR] docker build 失败，退出码: {rc}")
+            await websocket.send_text(f"[ERROR] 本地镜像打包失败，退出码: {rc}")
             await websocket.send_text("FAILED")
             return
 
-        await websocket.send_text("[状态] 正在推送镜像")
-        push_cmd = ["docker", "push", f"{image_repo}:{tag}"]
-        await websocket.send_text(f"$ {' '.join(push_cmd)}")
-        rc = await stream_command(websocket, push_cmd)
-        if rc != 0:
-            await websocket.send_text(f"[ERROR] docker push 失败，退出码: {rc}")
-            await websocket.send_text("FAILED")
-            return
+        for t in targets:
+            image_with_tag = f"{t.full_name}:{tag}"
+            await websocket.send_text(
+                f"[状态] 正在打标签 — 仓库: {t.key}, 组件: {t.component}"
+            )
+            tag_cmd = [
+                "docker",
+                "tag",
+                local_image,
+                image_with_tag,
+            ]
+            await websocket.send_text(f"$ {' '.join(tag_cmd)}")
+            rc = await stream_command(websocket, tag_cmd)
+            if rc != 0:
+                await websocket.send_text(
+                    f"[ERROR] docker tag 失败（仓库 {t.key} 组件 {t.component}），退出码: {rc}"
+                )
+                await websocket.send_text("FAILED")
+                return
 
-        await websocket.send_text(f"[状态] 推送成功 — {image_repo}:{tag}")
+            await websocket.send_text(f"[状态] 正在推送镜像 — {image_with_tag}")
+            push_cmd = ["docker", "push", image_with_tag]
+            await websocket.send_text(f"$ {' '.join(push_cmd)}")
+            rc = await stream_command(websocket, push_cmd)
+            if rc != 0:
+                await websocket.send_text(
+                    f"[ERROR] docker push 失败（仓库 {t.key} 组件 {t.component}），退出码: {rc}"
+                )
+                await websocket.send_text("FAILED")
+                return
+
+        await websocket.send_text("[状态] 推送成功 — 所有选中仓库")
         await websocket.send_text("SUCCESS")
     except WebSocketDisconnect:
         raise
