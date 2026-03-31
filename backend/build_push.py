@@ -71,25 +71,45 @@ class RepoTarget:
     component: str  # 组件类型：gs / logic / gate / main
 
 
-def _iter_components(repo_cfg: dict[str, Any], project_image_name: str) -> Iterable[tuple[str, str]]:
+def _iter_components(
+    repo_cfg: dict[str, Any],
+    project_image_name: str,
+    *,
+    svr_type: Optional[str] = None,
+) -> Iterable[tuple[str, str]]:
     """
     返回 (component, image_name) 列表：
       - 如果存在 gs/logic/gate 对应的 image_name，则分别生成多个目标
       - 否则只返回一个 main 组件，使用项目级 image_name
     """
-    mapping = {
-        "gs": repo_cfg.get("gs_image_name"),
-        "logic": repo_cfg.get("logic_image_name"),
-        "gate": repo_cfg.get("gate_image_name"),
+    key_to_comp = {
+        "gs_image_name": "gs",
+        "logic_image_name": "logic",
+        "gate_image_name": "gate",
     }
+    mapping = {k: repo_cfg.get(k) for k in key_to_comp.keys()}
+
+    # 配置了 svr_type 时，三选一：仅使用指定类型
+    if svr_type:
+        if svr_type not in key_to_comp:
+            raise SystemExit(f"svr_type 配置错误: {svr_type}（仅支持 gs_image_name/logic_image_name/gate_image_name）")
+        name = mapping.get(svr_type)
+        if not name:
+            raise SystemExit(f"仓库缺少 {svr_type} 配置")
+        yield key_to_comp[svr_type], str(name)
+        return
+
+    # 未配置 svr_type 时兼容旧行为：如果仓库里配了多个组件则都推，否则走项目级 image_name
     has_any_component = any(bool(v) for v in mapping.values())
     if has_any_component:
-        for comp, name in mapping.items():
+        for key, comp in key_to_comp.items():
+            name = mapping.get(key)
             if not name:
                 continue
             yield comp, str(name)
-    else:
-        yield "main", project_image_name
+        return
+
+    yield "main", project_image_name
 
 
 def build_repo_targets(
@@ -107,6 +127,8 @@ def build_repo_targets(
         raise SystemExit(f"项目配置格式错误: {project_key}")
 
     image_name = str(project_cfg.get("image_name") or project_key)
+    svr_type_raw = project_cfg.get("svr_type")
+    svr_type = str(svr_type_raw).strip() if isinstance(svr_type_raw, str) and svr_type_raw.strip() else None
     repo_keys = project_cfg.get("repositories") or []
     if not isinstance(repo_keys, list) or not repo_keys:
         raise SystemExit(f"项目未配置 repositories: {project_key}")
@@ -144,7 +166,7 @@ def build_repo_targets(
             raise SystemExit(f"仓库未配置有效地址(ip 或 ALIYUN_URL/ALIYUN_PROJECT_NAME): {repo_key}")
 
         # 2) 解析组件镜像名
-        for component, name in _iter_components(repo_cfg, image_name):
+        for component, name in _iter_components(repo_cfg, image_name, svr_type=svr_type):
             full_name = f"{prefix.rstrip('/')}/{name}"
             targets.append(RepoTarget(key=repo_key, full_name=full_name, component=component))
 
