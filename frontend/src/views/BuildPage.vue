@@ -88,8 +88,8 @@ async function fetchReposForSelected() {
     if (!r.ok) throw new Error(await r.text());
     const data = await r.json();
     repoOptions.value = Array.isArray(data) ? data : [];
-    // 默认全选
-    selectedRepos.value = [...repoOptions.value];
+    // 默认不勾选，需用户手动选择
+    selectedRepos.value = [];
   } catch (e) {
     ElMessage.error("获取仓库列表失败: " + e.message);
   }

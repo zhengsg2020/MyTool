@@ -459,11 +459,37 @@ async def ws_build(websocket: WebSocket, project_name: str):
 
             await websocket.send_text(f"[状态] 正在推送镜像 — {image_with_tag}")
             push_cmd = ["docker", "push", image_with_tag]
-            await websocket.send_text(f"$ {' '.join(push_cmd)}")
-            rc = await stream_command(websocket, push_cmd, compact_docker_push=True)
-            if rc != 0:
+            push_ok = False
+            for attempt in range(1, 4):
+                await websocket.send_text(f"[状态] 推送尝试 {attempt}/3")
+                await websocket.send_text(f"$ {' '.join(push_cmd)}")
+                rc = await stream_command(websocket, push_cmd, compact_docker_push=True)
+                if rc == 0:
+                    push_ok = True
+                    break
+                if attempt < 3:
+                    await websocket.send_text(
+                        f"[WARN] docker push 失败（退出码: {rc}），准备重试..."
+                    )
+                    if (
+                        isinstance(repo_cfg, dict)
+                        and build_push.is_aliyun_repo(repo_cfg)
+                    ):
+                        await websocket.send_text(
+                            f"[状态] 推送失败后重新登录阿里云仓库 — {t.key}"
+                        )
+                        try:
+                            build_push.ensure_aliyun_login(repo_cfg, dry_run=False)
+                        except Exception as exc:
+                            await websocket.send_text(
+                                f"[ERROR] 阿里云重登录失败（仓库 {t.key}）：{exc}"
+                            )
+                            await websocket.send_text("FAILED")
+                            return
+                    await asyncio.sleep(attempt * 2)
+            if not push_ok:
                 await websocket.send_text(
-                    f"[ERROR] docker push 失败（仓库 {t.key} 组件 {t.component}），退出码: {rc}"
+                    f"[ERROR] docker push 失败（仓库 {t.key} 组件 {t.component}），已重试 3 次"
                 )
                 await websocket.send_text("FAILED")
                 return

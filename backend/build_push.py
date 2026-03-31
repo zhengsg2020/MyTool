@@ -46,6 +46,8 @@ from typing import Any, Iterable, List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD_CONFIG_PATH = ROOT / "config" / "build" / "config.json"
+PUSH_RETRY_TIMES = 3
+LOGIN_RETRY_TIMES = 3
 
 
 def make_datetime_tag(project_key: str) -> str:
@@ -199,22 +201,29 @@ def ensure_aliyun_login(repo_cfg: dict[str, Any], *, dry_run: bool = False) -> N
     if not token:
         raise SystemExit("获取阿里云镜像仓库授权 token 失败")
 
-    print(f"[状态] 正在登录 Docker 仓库: {registry}")
-    subprocess.run(
-        ["docker", "logout", registry],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    subprocess.run(
-        ["docker", "login", "--username=cr_temp_user", f"--password={token}", registry],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    print(f"[信息] 阿里云仓库登录成功: {registry}")
+    for attempt in range(1, LOGIN_RETRY_TIMES + 1):
+        print(f"[状态] 正在登录 Docker 仓库: {registry}（尝试 {attempt}/{LOGIN_RETRY_TIMES}）")
+        subprocess.run(
+            ["docker", "logout", registry],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        login_res = subprocess.run(
+            ["docker", "login", "--username=cr_temp_user", f"--password={token}", registry],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if login_res.returncode == 0:
+            print(f"[信息] 阿里云仓库登录成功: {registry}")
+            return
+        if attempt < LOGIN_RETRY_TIMES:
+            print("[WARN] Docker 登录失败，准备重试...")
+            time.sleep(attempt * 2)
+    raise SystemExit(f"Docker 登录失败: {registry}")
 
 
 @dataclass
@@ -431,14 +440,26 @@ def build_and_push(
         )
 
         print(f"[状态] 正在推送镜像 — {image_with_tag}")
-        run_cmd(
-            [
-                "docker",
-                "push",
-                image_with_tag,
-            ],
-            dry_run=dry_run,
-        )
+        push_cmd = ["docker", "push", image_with_tag]
+        if dry_run:
+            run_cmd(push_cmd, dry_run=True)
+            continue
+
+        push_ok = False
+        for attempt in range(1, PUSH_RETRY_TIMES + 1):
+            print(f"[状态] 推送尝试 {attempt}/{PUSH_RETRY_TIMES} — {image_with_tag}")
+            res = subprocess.run(push_cmd, check=False)
+            if res.returncode == 0:
+                push_ok = True
+                break
+            if attempt < PUSH_RETRY_TIMES:
+                print(f"[WARN] docker push 失败，退出码: {res.returncode}，准备重试...")
+                if isinstance(repo_cfg, dict) and is_aliyun_repo(repo_cfg):
+                    print(f"[状态] 推送失败后重新登录阿里云仓库 — {t.key}")
+                    ensure_aliyun_login(repo_cfg, dry_run=False)
+                time.sleep(attempt * 2)
+        if not push_ok:
+            raise SystemExit(f"docker push 最终失败: {image_with_tag}")
 
     print("[状态] 所有镜像处理完成")
 
