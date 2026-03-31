@@ -137,7 +137,7 @@ def append_build_log(line: str) -> None:
         f.write(f"[{stamp}] {line}\n")
 
 
-def read_build_log_lines(limit: int = 300) -> list[str]:
+def read_build_log_lines(limit: int = 10) -> list[str]:
     if not BUILD_LOG_PATH.is_file():
         return []
     try:
@@ -370,7 +370,7 @@ async def list_project_repositories(project_name: str):
 
 @app.get("/api/build/log")
 async def get_build_log():
-    return read_build_log_lines()
+    return read_build_log_lines(limit=10)
 
 
 @app.get("/api/build/history")

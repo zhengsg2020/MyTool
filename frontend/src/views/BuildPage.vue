@@ -8,6 +8,7 @@ const repoOptions = ref([]);
 const selectedRepos = ref([]);
 const logLines = ref([]);
 const buildHistory = ref([]);
+const showHistory = ref(false);
 const wsConnected = ref(false);
 const building = ref(false);
 const finishedOk = ref(null);
@@ -81,22 +82,30 @@ async function fetchProjects() {
 async function fetchSavedLog() {
   try {
     const r = await fetch("/api/build/log");
-    if (!r.ok) throw new Error(await r.text());
+    if (!r.ok) {
+      // 兼容旧后端未实现该接口，不打断页面使用
+      logLines.value = [];
+      return;
+    }
     const data = await r.json();
     logLines.value = Array.isArray(data) ? data : [];
   } catch (e) {
-    ElMessage.error("加载历史日志失败: " + e.message);
+    logLines.value = [];
   }
 }
 
 async function fetchBuildHistory() {
   try {
     const r = await fetch("/api/build/history");
-    if (!r.ok) throw new Error(await r.text());
+    if (!r.ok) {
+      // 兼容旧后端未实现该接口，不打断页面使用
+      buildHistory.value = [];
+      return;
+    }
     const data = await r.json();
     buildHistory.value = Array.isArray(data) ? data : [];
   } catch (e) {
-    ElMessage.error("加载构建记录失败: " + e.message);
+    buildHistory.value = [];
   }
 }
 
@@ -260,12 +269,15 @@ onMounted(async () => {
         <el-button size="small" type="danger" :disabled="!building" @click="cancelBuild">
           终止构建
         </el-button>
+        <el-button size="small" @click="showHistory = !showHistory">
+          {{ showHistory ? "隐藏构建记录" : "构建记录" }}
+        </el-button>
       </div>
       <div ref="logRef" class="console">
         <div v-for="(line, i) in logLines" :key="i" class="line">{{ line }}</div>
         <div v-if="!logLines.length" class="placeholder">日志将显示在此处...</div>
       </div>
-      <div class="history">
+      <div v-if="showHistory" class="history">
         <div class="history-title">构建记录</div>
         <el-table :data="buildHistory" size="small" height="220">
           <el-table-column prop="time" label="时间" min-width="160" />

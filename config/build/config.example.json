@@ -2,36 +2,36 @@
     "projects": {
         "lnp_trunk": {
             "image_name": "lnp_trunk",
-            "repositories": ["185_lnp_trunk", "dragon_stg"]
+            "repositories": ["test1", "test3"]
         },
         "lnp_dev": {
             "image_name": "lnp_dev",
-            "repositories": ["185_lnp_dev"]
+            "repositories": ["test2"]
         }
     },
     "repositories": {
-        "185_lnp_trunk": {
-            "ip": "192.168.1.185:5005/dragon",
-            "gs_image_name": "lnp_trunk",
-            "logic_image_name": "logic",
-            "gate_image_name": "gate"
+        "test1": {
+            "ip": "ip",
+            "gs_image_name": "",
+            "logic_image_name": "",
+            "gate_image_name": ""
         },
-        "185_lnp_dev": {
-            "ip": "192.168.1.185:5005/dragon",
-            "gs_image_name": "lnp_dev",
-            "logic_image_name": "logic",
-            "gate_image_name": "gate"
+        "test2": {
+            "ip": "ip",
+            "gs_image_name": "",
+            "logic_image_name": "",
+            "gate_image_name": ""
         },
-        "dragon_stg": {
-            "ALIYUN_PROJECT_NAME": "dragon",
+        "test3": {
+            "ALIYUN_PROJECT_NAME": "name",
             "ALIYUN_ACCESS_KEY_ID": "<your-access-key-id>",
             "ALIYUN_ACCESS_KEY_SECRET": "<your-access-key-secret>",
             "ALIYUN_REGION_ID": "ap-northeast-1",
-            "ALIYUN_URL": "g123-jp-stg-registry.ap-northeast-1.cr.aliyuncs.com",
+            "ALIYUN_URL": "ip",
             "ALIYUN_KEY_STR": "<your-registry-key>",
-            "gs_image_name": "maiddragon",
-            "logic_image_name": "logic",
-            "gate_image_name": "gate"
+            "gs_image_name": "",
+            "logic_image_name": "",
+            "gate_image_name": ""
         }
     }
 }
