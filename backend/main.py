@@ -367,7 +367,7 @@ async def ws_build(websocket: WebSocket, project_name: str):
             await websocket.send_text("FAILED")
             return
 
-        tag = build_push.make_datetime_tag()
+        tag = build_push.make_datetime_tag(project_name)
         await websocket.send_text("[状态] 正在生成版本号")
         await websocket.send_text(f"[信息] 本次 Tag: {tag}")
 

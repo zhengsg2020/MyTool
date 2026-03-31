@@ -46,9 +46,9 @@ ROOT = Path(__file__).resolve().parent.parent
 BUILD_CONFIG_PATH = ROOT / "config" / "build" / "config.json"
 
 
-def make_datetime_tag() -> str:
-    """生成基于当前日期时间的镜像 Tag，格式：YYYYMMDDHHMMSS。"""
-    return datetime.now().strftime("%Y%m%d%H%M%S")
+def make_datetime_tag(project_key: str) -> str:
+    """生成镜像 Tag，格式：{项目名}_{yyMMdd_HHmmss}。"""
+    return f"{project_key}_{datetime.now().strftime('%y%m%d_%H%M%S')}"
 
 
 def load_build_config(path: Path = BUILD_CONFIG_PATH) -> dict[str, Any]:
@@ -250,7 +250,7 @@ def build_and_push(
     dry_run: bool = False,
 ) -> None:
     cfg = load_build_config()
-    tag = make_datetime_tag()
+    tag = make_datetime_tag(project_key)
     targets = build_repo_targets(project_key, cfg, only_repo=only_repo)
     release_dir = release_dir_for_project(project_key)
     if not release_dir.is_dir():
