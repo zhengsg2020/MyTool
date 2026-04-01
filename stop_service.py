@@ -120,14 +120,40 @@ def kill_pids(pids: set[int]) -> int:
     for pid in sorted(pids):
         try:
             if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(pid), "/F"], check=False)
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False)
             else:
                 os.kill(pid, signal.SIGTERM)
+                try:
+                    # give process a short grace period
+                    for _ in range(10):
+                        os.kill(pid, 0)
+                    # still alive -> force kill
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
             print(f"Stopped PID {pid}")
         except Exception as exc:
             print(f"Failed to stop PID {pid}: {exc}")
             return 1
     return 0
+
+
+def is_pid_running(pid: int) -> bool:
+    try:
+        if os.name == "nt":
+            proc = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            text = proc.stdout.lower()
+            return str(pid) in text and "no tasks are running" not in text
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
 
 
 def try_kill_pid_file() -> bool:
@@ -148,11 +174,16 @@ def try_kill_pid_file() -> bool:
     # kill
     try:
         if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(pid), "/F"], check=False)
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False)
         else:
             # Check if process exists
             os.kill(pid, 0)
             os.kill(pid, signal.SIGTERM)
+            try:
+                os.kill(pid, 0)
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
     except Exception:
         # If it's already dead, we still clean pid file.
         pass
@@ -160,8 +191,51 @@ def try_kill_pid_file() -> bool:
         PID_FILE.unlink(missing_ok=True)
     except Exception:
         pass
+    if is_pid_running(pid):
+        print(f"[WARN] pid file target still running: {pid}")
+        return False
     print(f"Stopped by pid file: {pid}")
     return True
+
+
+def unix_pids_by_command() -> set[int]:
+    if not shutil.which("pgrep"):
+        return set()
+    proc = subprocess.run(
+        ["pgrep", "-f", r"(backend/run_server\.py|serve\.py run|uvicorn.*main:app)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    pids: set[int] = set()
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.add(int(line))
+    return pids
+
+
+def windows_pids_by_command() -> set[int]:
+    # Use CIM to read command line; wmics are deprecated on newer systems.
+    ps_cmd = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.CommandLine -match 'backend\\\\run_server\\.py|serve\\.py\\s+run|uvicorn.*main:app' } | "
+        "Select-Object -ExpandProperty ProcessId"
+    )
+    proc = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", ps_cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    pids: set[int] = set()
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.add(int(line))
+    return pids
 
 
 def main() -> int:
@@ -173,9 +247,9 @@ def main() -> int:
         return 0
 
     if os.name == "nt":
-        pids = windows_pids_by_port(port)
+        pids = windows_pids_by_port(port) | windows_pids_by_command()
     else:
-        pids = unix_pids_by_port(port)
+        pids = unix_pids_by_port(port) | unix_pids_by_command()
     if not pids:
         print("No running service process found.")
         return 0
