@@ -59,10 +59,17 @@ function appendLog(line) {
   });
 }
 
-function clearLog() {
-  logLines.value = [];
-  phase.value = "idle";
-  finishedOk.value = null;
+async function clearLog() {
+  try {
+    const r = await fetch("/api/build/log", { method: "DELETE" });
+    if (!r.ok) throw new Error(await r.text());
+    logLines.value = [];
+    phase.value = "idle";
+    finishedOk.value = null;
+    ElMessage.success("已清除构建日志文件");
+  } catch (e) {
+    ElMessage.error("清除日志失败: " + e.message);
+  }
 }
 
 async function fetchProjects() {

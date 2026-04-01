@@ -405,6 +405,16 @@ async def get_build_log(
     return read_build_log_lines(limit=limit)
 
 
+@app.delete("/api/build/log")
+async def clear_build_log():
+    try:
+        if BUILD_LOG_PATH.exists():
+            BUILD_LOG_PATH.unlink()
+        return {"ok": True, "message": "构建日志已删除"}
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"删除日志失败: {exc}")
+
+
 @app.get("/api/build/history")
 async def get_build_history(
     limit: int = Query(default=200, ge=1, le=500, description="最多返回条数"),
