@@ -49,6 +49,21 @@ BUILD_LOCK = asyncio.Lock()
 BUILD_CANCEL_EVENT = asyncio.Event()
 RUNNING_PROCS: set[asyncio.subprocess.Process] = set()
 
+
+def ensure_runtime_artifacts() -> None:
+    """
+    启动时确保日志目录与文件存在，避免首屏读取为空时被误判为“未保存”。
+    """
+    BUILD_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not BUILD_LOG_PATH.exists():
+        BUILD_LOG_PATH.touch()
+    if not BUILD_HISTORY_PATH.exists():
+        with BUILD_HISTORY_PATH.open("w", encoding="utf-8", newline="\n") as f:
+            f.write("[]\n")
+
+
+ensure_runtime_artifacts()
+
 _cors = os.environ.get("CORS_ORIGINS", "").strip()
 if _cors:
     app.add_middleware(
@@ -386,6 +401,23 @@ async def get_build_history(
     limit: int = Query(default=200, ge=1, le=500, description="最多返回条数"),
 ):
     return read_build_history(limit=limit)
+
+
+@app.get("/api/build/debug-paths")
+async def get_build_debug_paths():
+    root = runtime_root()
+    log_exists = BUILD_LOG_PATH.is_file()
+    history_exists = BUILD_HISTORY_PATH.is_file()
+    return {
+        "runtime_root": str(root.resolve()),
+        "logs_dir": str(BUILD_LOG_PATH.parent.resolve()),
+        "build_log_path": str(BUILD_LOG_PATH.resolve()),
+        "build_history_path": str(BUILD_HISTORY_PATH.resolve()),
+        "build_log_exists": log_exists,
+        "build_history_exists": history_exists,
+        "build_log_size": BUILD_LOG_PATH.stat().st_size if log_exists else 0,
+        "build_history_size": BUILD_HISTORY_PATH.stat().st_size if history_exists else 0,
+    }
 
 
 @app.get("/api/sites", response_model=list[SiteOut])

@@ -83,14 +83,15 @@ async function fetchSavedLog() {
   try {
     const r = await fetch("/api/build/log?limit=5000");
     if (!r.ok) {
-      // 兼容旧后端未实现该接口，不打断页面使用
-      logLines.value = [];
+      // 接口异常时保留当前日志，避免“页面把日志清空”的观感
       return;
     }
     const data = await r.json();
-    logLines.value = Array.isArray(data) ? data : [];
+    if (Array.isArray(data)) {
+      logLines.value = data;
+    }
   } catch (e) {
-    logLines.value = [];
+    // 网络异常时保留当前日志
   }
 }
 
@@ -98,14 +99,15 @@ async function fetchBuildHistory() {
   try {
     const r = await fetch("/api/build/history?limit=200");
     if (!r.ok) {
-      // 兼容旧后端未实现该接口，不打断页面使用
-      buildHistory.value = [];
+      // 接口异常时保留当前记录，避免误清空
       return;
     }
     const data = await r.json();
-    buildHistory.value = Array.isArray(data) ? data : [];
+    if (Array.isArray(data)) {
+      buildHistory.value = data;
+    }
   } catch (e) {
-    buildHistory.value = [];
+    // 网络异常时保留当前记录
   }
 }
 
@@ -145,10 +147,10 @@ function startBuild() {
     return;
   }
   disconnect();
-  clearLog();
   building.value = true;
   finishedOk.value = null;
   phase.value = "preparing";
+  appendLog(`[信息] 开始新任务 — 项目: ${selected.value}`);
 
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host;
