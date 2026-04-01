@@ -81,7 +81,7 @@ async function fetchProjects() {
 
 async function fetchSavedLog() {
   try {
-    const r = await fetch("/api/build/log");
+    const r = await fetch("/api/build/log?limit=5000");
     if (!r.ok) {
       // 兼容旧后端未实现该接口，不打断页面使用
       logLines.value = [];
@@ -96,7 +96,7 @@ async function fetchSavedLog() {
 
 async function fetchBuildHistory() {
   try {
-    const r = await fetch("/api/build/history");
+    const r = await fetch("/api/build/history?limit=200");
     if (!r.ok) {
       // 兼容旧后端未实现该接口，不打断页面使用
       buildHistory.value = [];
@@ -157,7 +157,10 @@ function startBuild() {
     selected.value
   )}?repos=${reposParam}`;
   socket = new WebSocket(url);
-  wsConnected.value = true;
+
+  socket.onopen = () => {
+    wsConnected.value = true;
+  };
 
   socket.onmessage = (ev) => {
     const text = String(ev.data);
@@ -168,6 +171,7 @@ function startBuild() {
       disconnect();
       ElMessage.success("构建与推送完成");
       fetchBuildHistory();
+      fetchSavedLog();
       return;
     }
     if (text === "FAILED") {
@@ -176,6 +180,8 @@ function startBuild() {
       building.value = false;
       disconnect();
       ElMessage.error("构建或推送失败");
+      fetchBuildHistory();
+      fetchSavedLog();
       return;
     }
     appendLog(text);

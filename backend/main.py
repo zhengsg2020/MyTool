@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
@@ -334,6 +334,12 @@ async def cancel_build():
     return {"ok": True, "message": "已发送终止信号"}
 
 
+@app.get("/api/build/cancel")
+async def cancel_build_get():
+    # 兼容旧前端或缓存资源触发的 GET 请求
+    return await cancel_build()
+
+
 @app.get("/api/projects")
 async def list_projects():
     # 返回项目 key 列表，保持与旧前端兼容
@@ -369,13 +375,17 @@ async def list_project_repositories(project_name: str):
 
 
 @app.get("/api/build/log")
-async def get_build_log():
-    return read_build_log_lines(limit=10)
+async def get_build_log(
+    limit: int = Query(default=2000, ge=1, le=20000, description="返回最近若干行"),
+):
+    return read_build_log_lines(limit=limit)
 
 
 @app.get("/api/build/history")
-async def get_build_history():
-    return read_build_history()
+async def get_build_history(
+    limit: int = Query(default=200, ge=1, le=500, description="最多返回条数"),
+):
+    return read_build_history(limit=limit)
 
 
 @app.get("/api/sites", response_model=list[SiteOut])
@@ -610,6 +620,30 @@ async def ws_build(websocket: WebSocket, project_name: str):
                     "repository": t.key,
                 }
             )
+
+            if build_push.gs_restart_should_run(
+                repo_cfg if isinstance(repo_cfg, dict) else None,
+                cfg,
+                t,
+            ):
+                base = build_push.resolve_gs_restart_api_base(repo_cfg, cfg)
+                profile = build_push.resolve_gs_restart_profile(repo_cfg)
+                if base and profile:
+                    await emit(
+                        f"[状态] 正在通知游服切换 GS 镜像 — 仓库 {t.key}, profile={profile}"
+                    )
+                    try:
+                        await asyncio.to_thread(
+                            build_push.notify_gs_restart_api,
+                            base,
+                            profile,
+                            image_with_tag,
+                        )
+                        await emit(f"[信息] 游服重启 API 已完成 — profile={profile}")
+                    except Exception as exc:
+                        await emit(
+                            f"[WARN] 游服重启 API 失败（镜像已成功推送）: {exc}"
+                        )
 
         await emit("[状态] 推送成功 — 所有选中仓库")
         await emit("SUCCESS")

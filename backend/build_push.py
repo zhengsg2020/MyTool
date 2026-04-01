@@ -39,6 +39,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -105,6 +107,55 @@ def is_aliyun_repo(repo_cfg: dict[str, Any]) -> bool:
             "ALIYUN_KEY_STR",
         )
     )
+
+
+def resolve_gs_restart_api_base(repo_cfg: dict[str, Any], cfg: dict[str, Any]) -> Optional[str]:
+    b = repo_cfg.get("gs_restart_api_base")
+    if isinstance(b, str) and b.strip():
+        return b.strip().rstrip("/")
+    root = cfg.get("gs_restart_api_base")
+    if isinstance(root, str) and root.strip():
+        return root.strip().rstrip("/")
+    return None
+
+
+def resolve_gs_restart_profile(repo_cfg: dict[str, Any]) -> Optional[str]:
+    p = repo_cfg.get("gs_restart_profile")
+    if isinstance(p, str) and p.strip():
+        return p.strip()
+    return None
+
+
+def notify_gs_restart_api(
+    api_base: str,
+    profile: str,
+    image_with_tag: str,
+    *,
+    dry_run: bool = False,
+) -> None:
+    """
+    调用 185 游服 HTTP API，切换 GS 镜像并触发 apply（与 Invoke-RestMethod Put 等价）。
+    """
+    url = f"{api_base.rstrip('/')}/api/service/gs/image-version"
+    payload = {"profile": profile, "image": image_with_tag, "apply": True}
+    if dry_run:
+        print(f"[状态] (dry-run) 跳过游服重启 API: PUT {url} body={json.dumps(payload, ensure_ascii=False)}")
+        return
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="PUT",
+        headers={"Content-Type": "application/json; charset=utf-8"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        raise RuntimeError(f"HTTP {e.code} {e.reason}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"请求失败: {e.reason}") from e
 
 
 def _extract_auth_token(payload: Any) -> Optional[str]:
@@ -338,6 +389,22 @@ def build_repo_targets(
     return targets
 
 
+def gs_restart_should_run(
+    repo_cfg: Optional[dict[str, Any]],
+    cfg: dict[str, Any],
+    target: RepoTarget,
+) -> bool:
+    if target.component != "gs":
+        return False
+    if not isinstance(repo_cfg, dict):
+        return False
+    if resolve_gs_restart_profile(repo_cfg) is None:
+        return False
+    if resolve_gs_restart_api_base(repo_cfg, cfg) is None:
+        return False
+    return True
+
+
 def run_cmd(cmd: list[str], *, dry_run: bool, cwd: Optional[Path] = None) -> None:
     display = " ".join(cmd)
     if cwd:
@@ -460,6 +527,21 @@ def build_and_push(
                 time.sleep(attempt * 2)
         if not push_ok:
             raise SystemExit(f"docker push 最终失败: {image_with_tag}")
+
+        if gs_restart_should_run(
+            repo_cfg if isinstance(repo_cfg, dict) else None,
+            cfg,
+            t,
+        ):
+            base = resolve_gs_restart_api_base(repo_cfg, cfg)
+            profile = resolve_gs_restart_profile(repo_cfg)
+            if base and profile:
+                print(f"[状态] 正在通知游服切换 GS 镜像 — {t.key}, profile={profile}")
+                try:
+                    notify_gs_restart_api(base, profile, image_with_tag, dry_run=dry_run)
+                    print(f"[信息] 游服重启 API 已完成 — profile={profile}")
+                except Exception as exc:
+                    print(f"[WARN] 游服重启 API 失败（镜像已成功推送）: {exc}")
 
     print("[状态] 所有镜像处理完成")
 
