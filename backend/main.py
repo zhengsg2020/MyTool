@@ -43,6 +43,7 @@ DEFAULT_BUILD_CONFIG_PATH = runtime_root() / "config" / "build" / "config.json"
 DEFAULT_SITES_CONFIG_PATH = runtime_root() / "config" / "sites" / "sites.json"
 BUILD_LOG_PATH = runtime_root() / "logs" / "build.log"
 BUILD_HISTORY_PATH = runtime_root() / "logs" / "build_history.json"
+BUILD_HISTORY_LOG_PATH = runtime_root() / "logs" / "build_history.log"
 
 app = FastAPI(title="Docker Build Publisher")
 BUILD_LOCK = asyncio.Lock()
@@ -60,6 +61,8 @@ def ensure_runtime_artifacts() -> None:
     if not BUILD_HISTORY_PATH.exists():
         with BUILD_HISTORY_PATH.open("w", encoding="utf-8", newline="\n") as f:
             f.write("[]\n")
+    if not BUILD_HISTORY_LOG_PATH.exists():
+        BUILD_HISTORY_LOG_PATH.touch()
 
 
 ensure_runtime_artifacts()
@@ -177,6 +180,12 @@ def append_build_history(entry: dict[str, str]) -> None:
         data = []
     data.append(entry)
     save_json_file(BUILD_HISTORY_PATH, data[-500:])
+    # 兼容人工排查习惯：同步追加一份可读 log 文本
+    with BUILD_HISTORY_LOG_PATH.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(
+            f"[{entry.get('time','')}] repo={entry.get('repository','')} "
+            f"ip={entry.get('ip','')} image={entry.get('image','')}\n"
+        )
 
 
 def _resolve_config_ref(value: Any, default_path: Path) -> Path:
@@ -413,10 +422,15 @@ async def get_build_debug_paths():
         "logs_dir": str(BUILD_LOG_PATH.parent.resolve()),
         "build_log_path": str(BUILD_LOG_PATH.resolve()),
         "build_history_path": str(BUILD_HISTORY_PATH.resolve()),
+        "build_history_log_path": str(BUILD_HISTORY_LOG_PATH.resolve()),
         "build_log_exists": log_exists,
         "build_history_exists": history_exists,
         "build_log_size": BUILD_LOG_PATH.stat().st_size if log_exists else 0,
         "build_history_size": BUILD_HISTORY_PATH.stat().st_size if history_exists else 0,
+        "build_history_log_exists": BUILD_HISTORY_LOG_PATH.is_file(),
+        "build_history_log_size": BUILD_HISTORY_LOG_PATH.stat().st_size
+        if BUILD_HISTORY_LOG_PATH.is_file()
+        else 0,
     }
 
 
