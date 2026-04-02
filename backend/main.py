@@ -78,6 +78,22 @@ def _parse_proxy_index_override(query_params: Any) -> Optional[int]:
         return None
 
 
+def _parse_use_proxy_flag(query_params: Any) -> Optional[bool]:
+    """
+    WebSocket 查询参数 use_proxy：1/true 表示页面勾选使用代理；0/false 表示不用。
+    未传则 None，后端沿用配置文件 aliyun_proxy_enabled（兼容旧前端/脚本）。
+    """
+    raw = query_params.get("use_proxy")
+    if raw is None or raw == "":
+        return None
+    s = str(raw).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
 _cors = os.environ.get("CORS_ORIGINS", "").strip()
 if _cors:
     app.add_middleware(
@@ -390,8 +406,7 @@ async def list_projects():
 @app.get("/api/projects/{project_name}/repositories")
 async def list_project_repositories(project_name: str):
     """
-    返回某项目可选仓库列表，供前端勾选。
-    每项: { "key": 仓库键, "user_proxy": 是否对该仓库使用代理（仅表示开关，实际 URL 来自根配置 proxy） }。
+    返回某项目可用的仓库键列表，供前端勾选（仅 key，是否走代理由页面勾选决定）。
     """
     cfg = build_push.load_build_config()
     projects = cfg.get("projects") or {}
@@ -404,16 +419,10 @@ async def list_project_repositories(project_name: str):
     if not isinstance(repo_keys, list):
         raise HTTPException(status_code=500, detail="项目 repositories 配置错误")
 
-    repos_cfg = cfg.get("repositories") if isinstance(cfg.get("repositories"), dict) else {}
-    result: list[dict[str, Any]] = []
+    result: list[str] = []
     for key in repo_keys:
-        if not isinstance(key, str) or not key:
-            continue
-        item: dict[str, Any] = {"key": key, "user_proxy": False}
-        r_cfg = repos_cfg.get(key)
-        if isinstance(r_cfg, dict) and "user_proxy" in r_cfg:
-            item["user_proxy"] = bool(r_cfg["user_proxy"])
-        result.append(item)
+        if isinstance(key, str) and key:
+            result.append(key)
     return result
 
 
@@ -556,6 +565,7 @@ async def ws_build(websocket: WebSocket, project_name: str):
             return
 
         proxy_index_override = _parse_proxy_index_override(websocket.query_params)
+        client_use_proxy = _parse_use_proxy_flag(websocket.query_params)
 
         # 构建目录：~/{项目名}_home/{项目名}/x64_Env/LinuxRelease
         release_dir = build_push.release_dir_for_project(project_name)
@@ -628,6 +638,7 @@ async def ws_build(websocket: WebSocket, project_name: str):
                         dry_run=False,
                         attempt=1,
                         proxy_index_override=proxy_index_override,
+                        client_use_proxy=client_use_proxy,
                     )
                 except Exception as exc:
                     if not hasattr(exc, "args") or not exc.args:
@@ -672,6 +683,7 @@ async def ws_build(websocket: WebSocket, project_name: str):
                         cfg=cfg,
                         attempt=attempt,
                         proxy_index_override=proxy_index_override,
+                        client_use_proxy=client_use_proxy,
                     )
                     if isinstance(repo_cfg, dict) and build_push.is_aliyun_repo(repo_cfg)
                     else None
@@ -714,6 +726,7 @@ async def ws_build(websocket: WebSocket, project_name: str):
                                 dry_run=False,
                                 attempt=attempt + 1,
                                 proxy_index_override=proxy_index_override,
+                                client_use_proxy=client_use_proxy,
                             )
                         except Exception as exc:
                             await emit(

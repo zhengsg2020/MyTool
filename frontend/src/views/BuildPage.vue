@@ -11,6 +11,8 @@ const buildHistory = ref([]);
 /** 根配置 proxy 列表，下拉展示完整 URL */
 const proxyOptions = ref([]);
 const selectedProxyIndex = ref(null);
+/** 页面勾选：本次构建推送阿里云时是否使用下方所选代理 */
+const usePushProxy = ref(false);
 const showHistory = ref(false);
 const wsConnected = ref(false);
 const building = ref(false);
@@ -37,12 +39,6 @@ const statusType = computed(() => {
     return "warning";
   }
   return "info";
-});
-
-/** 当前勾选的仓库里是否存在 user_proxy: true（仅这些仓库会走下方所选代理） */
-const proxySelectionRelevant = computed(() => {
-  const set = new Set(selectedRepos.value);
-  return repoOptions.value.some((r) => set.has(r.key) && r.user_proxy);
 });
 
 function inferPhase(line) {
@@ -82,9 +78,7 @@ async function clearLog() {
 }
 
 function proxySelectLabel(opt) {
-  if (!opt || !opt.url) return "";
-  const k = opt.key ? ` — ${opt.key}` : "";
-  return `${opt.url}${k}`;
+  return opt?.url ? String(opt.url) : "";
 }
 
 async function fetchProxyOptions() {
@@ -163,15 +157,15 @@ async function fetchReposForSelected() {
     if (!Array.isArray(data)) {
       repoOptions.value = [];
     } else {
-      repoOptions.value = data.map((row) => {
-        if (row && typeof row === "object" && typeof row.key === "string") {
-          return { key: row.key, user_proxy: !!row.user_proxy };
-        }
-        if (typeof row === "string") {
-          return { key: row, user_proxy: false };
-        }
-        return null;
-      }).filter(Boolean);
+      repoOptions.value = data
+        .map((row) => {
+          if (typeof row === "string") return row;
+          if (row && typeof row === "object" && typeof row.key === "string") {
+            return row.key;
+          }
+          return null;
+        })
+        .filter(Boolean);
     }
     // 默认不勾选，需用户手动选择
     selectedRepos.value = [];
@@ -209,8 +203,9 @@ function startBuild() {
   let url = `${proto}//${host}/ws/build/${encodeURIComponent(
     selected.value
   )}?repos=${reposParam}`;
+  url += `&use_proxy=${usePushProxy.value ? "1" : "0"}`;
   if (
-    proxySelectionRelevant.value &&
+    usePushProxy.value &&
     proxyOptions.value.length > 0 &&
     selectedProxyIndex.value !== null &&
     selectedProxyIndex.value !== undefined &&
@@ -292,7 +287,7 @@ onMounted(async () => {
 
 <template>
   <el-container class="page">
-    <el-aside width="240px" class="aside">
+    <el-aside width="288px" class="aside">
       <div class="aside-title">项目</div>
       <el-select
         v-model="selected"
@@ -312,42 +307,13 @@ onMounted(async () => {
       >
         <el-checkbox
           v-for="r in repoOptions"
-          :key="r.key"
-          :label="r.key"
+          :key="r"
+          :label="r"
           class="repo-checkbox"
         >
-          <span class="repo-label">{{ r.key }}</span>
-          <el-tag
-            v-if="r.user_proxy"
-            size="small"
-            type="warning"
-            effect="plain"
-            class="repo-proxy-tag"
-          >
-            代理
-          </el-tag>
+          {{ r }}
         </el-checkbox>
       </el-checkbox-group>
-      <template v-if="proxyOptions.length > 0">
-        <div class="aside-subtitle">推送代理</div>
-        <p class="proxy-hint">
-          仅勾选了带「代理」标的仓库（配置 <code class="proxy-code">user_proxy: true</code>）时启用；下拉框内为完整代理 URL。
-        </p>
-        <el-select
-          v-model="selectedProxyIndex"
-          class="project-select proxy-select"
-          placeholder="选择代理 URL"
-          filterable
-          :disabled="building || !selected || !proxySelectionRelevant"
-        >
-          <el-option
-            v-for="opt in proxyOptions"
-            :key="`${opt.key}-${opt.list_index}`"
-            :label="proxySelectLabel(opt)"
-            :value="opt.list_index"
-          />
-        </el-select>
-      </template>
       <el-button
         type="primary"
         class="btn-build"
@@ -358,6 +324,35 @@ onMounted(async () => {
         开始构建
       </el-button>
       <el-button class="btn-clear" :disabled="building" @click="clearLog">清除日志</el-button>
+      <div class="aside-subtitle proxy-section-title">推送代理</div>
+      <el-checkbox v-model="usePushProxy" class="proxy-toggle" :disabled="building">
+        推送阿里云时使用代理
+      </el-checkbox>
+      <el-select
+        v-if="proxyOptions.length > 0"
+        v-model="selectedProxyIndex"
+        class="project-select proxy-select"
+        placeholder="选择代理 URL（完整地址）"
+        filterable
+        :disabled="building || !usePushProxy"
+      >
+        <el-option
+          v-for="opt in proxyOptions"
+          :key="`${opt.list_index}-${opt.url}`"
+          :label="proxySelectLabel(opt)"
+          :value="opt.list_index"
+        />
+      </el-select>
+      <div v-else class="proxy-empty">
+        未配置根级
+        <code class="proxy-code">proxy</code>
+        数组时无列表。请在
+        <code class="proxy-code">config/build/config.json</code>
+        中配置 URL 列表后重建前端并重启服务。
+      </div>
+      <p v-if="proxyOptions.length > 0" class="proxy-hint-bottom">
+        勾选「使用代理」后，本次任务中所有<strong>阿里云</strong>推送会走所选 URL；内网仓库不受影响。
+      </p>
       <div class="meta">
         <span v-if="wsConnected" class="dot on" />{{ wsConnected ? "已连接" : "未连接" }}
       </div>
@@ -425,26 +420,41 @@ onMounted(async () => {
 }
 .repo-checkbox {
   margin-left: 0;
+}
+.proxy-section-title {
+  margin-top: 4px;
+}
+.proxy-toggle {
+  display: flex;
   width: 100%;
+  margin-bottom: 8px;
 }
-.repo-checkbox :deep(.el-checkbox__label) {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  width: 100%;
+.proxy-toggle :deep(.el-checkbox__label) {
+  white-space: normal;
+  line-height: 1.35;
+  font-size: 12px;
+  color: #cdd6f4;
 }
-.repo-label {
-  word-break: break-all;
-}
-.repo-proxy-tag {
-  flex-shrink: 0;
-}
-.proxy-hint {
-  margin: 0 0 8px;
+.proxy-hint-bottom {
+  margin: 0 0 4px;
   font-size: 11px;
   line-height: 1.45;
   color: #a6adc8;
+}
+.proxy-empty {
+  margin-bottom: 10px;
+  padding: 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #bac2de;
+  background: #181825;
+  border: 1px dashed #45475a;
+  border-radius: 6px;
+}
+.proxy-empty strong,
+.proxy-hint-bottom strong {
+  color: #f9e2af;
+  font-weight: 600;
 }
 .proxy-code {
   font-family: ui-monospace, "Consolas", monospace;

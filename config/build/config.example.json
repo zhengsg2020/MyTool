@@ -1,15 +1,9 @@
 {
     "gs_restart_api_base": "",
-    "proxy": {
-        "proxy1": {
-            "url": "http://127.0.0.1:7890",
-            "index": 0
-        },
-        "proxy2": {
-            "url": "http://127.0.0.1:7891",
-            "index": 1
-        }
-    },
+    "proxy": [
+        "http://127.0.0.1:7890",
+        "http://127.0.0.1:7891"
+    ],
     "projects": {
         "lnp_trunk": {
             "image_name": "lnp_trunk",
@@ -41,7 +35,6 @@
             "ALIYUN_REGION_ID": "ap-northeast-1",
             "ALIYUN_URL": "ip",
             "ALIYUN_KEY_STR": "<your-registry-key>",
-            "user_proxy": false,
             "gs_image_name": "",
             "logic_image_name": "",
             "gate_image_name": ""

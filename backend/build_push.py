@@ -186,33 +186,68 @@ def _extract_auth_token(payload: Any) -> Optional[str]:
 
 def _global_proxy_rows(cfg: Optional[dict[str, Any]]) -> list[tuple[int, str, str]]:
     """
-    读取根配置 proxy 对象，返回未排序的 (sort_key, url, config_key) 列表。
+    读取根配置 proxy，返回未排序的 (sort_key, url, stable_id) 列表。
+
+    支持三种写法（可混用迁移期，建议新配置用数组）：
+      1) 数组：["http://a:1080", "http://b:1080"] — 顺序即优先级
+      2) 数组对象：[{ "url": "...", "index": 0 }, ...] — 按 index 升序，缺 index 时用数组下标
+      3) 旧版对象：{ "proxy1": { "url": "...", "index": 0 }, ... }
     """
-    if not cfg or not isinstance(cfg.get("proxy"), dict):
+    if not cfg:
         return []
-    px = cfg["proxy"]
+    px = cfg.get("proxy")
+    if px is None:
+        return []
     rows: list[tuple[int, str, str]] = []
-    for name, node in px.items():
-        if not isinstance(node, dict):
-            continue
-        url = node.get("url")
-        if not isinstance(url, str) or not url.strip():
-            continue
-        idx_raw = node.get("index")
-        if idx_raw is None:
-            sort_key = 1_000_000
-        else:
-            try:
-                sort_key = int(idx_raw)
-            except (TypeError, ValueError):
+
+    if isinstance(px, list):
+        for i, item in enumerate(px):
+            if isinstance(item, str):
+                u = item.strip()
+                if not u:
+                    continue
+                rows.append((i, u, f"#{i}"))
+            elif isinstance(item, dict):
+                url = item.get("url")
+                if not isinstance(url, str) or not url.strip():
+                    continue
+                u = url.strip()
+                idx_raw = item.get("index")
+                if idx_raw is None:
+                    sort_key = i
+                else:
+                    try:
+                        sort_key = int(idx_raw)
+                    except (TypeError, ValueError):
+                        sort_key = i
+                sid = item.get("id") or item.get("name") or f"#{i}"
+                rows.append((sort_key, u, str(sid)))
+        return rows
+
+    if isinstance(px, dict):
+        for name, node in px.items():
+            if not isinstance(node, dict):
+                continue
+            url = node.get("url")
+            if not isinstance(url, str) or not url.strip():
+                continue
+            idx_raw = node.get("index")
+            if idx_raw is None:
                 sort_key = 1_000_000
-        rows.append((sort_key, url.strip(), str(name)))
-    return rows
+            else:
+                try:
+                    sort_key = int(idx_raw)
+                except (TypeError, ValueError):
+                    sort_key = 1_000_000
+            rows.append((sort_key, url.strip(), str(name)))
+        return rows
+
+    return []
 
 
 def _global_proxy_urls(cfg: Optional[dict[str, Any]]) -> list[str]:
     """
-    按各条目的 index 升序排列；缺 index 的条目排在后面。
+    排序规则：有 index 的按 index 升序；旧版对象里缺 index 的排在后面；纯字符串数组按书写顺序。
     """
     rows = _global_proxy_rows(cfg)
     if not rows:
@@ -223,7 +258,7 @@ def _global_proxy_urls(cfg: Optional[dict[str, Any]]) -> list[str]:
 
 def list_global_proxy_options(cfg: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    供前端展示：与 _global_proxy_urls 同序，每项含配置键名、URL、在列表中的下标。
+    供前端展示：与 _global_proxy_urls 同序；list_index 为下拉选用的下标；key 仅作内部区分可忽略展示。
     """
     rows = _global_proxy_rows(cfg)
     if not rows:
@@ -236,8 +271,7 @@ def list_global_proxy_options(cfg: Optional[dict[str, Any]]) -> list[dict[str, A
 
 
 def _proxy_enabled(repo_cfg: dict[str, Any], cfg: Optional[dict[str, Any]]) -> bool:
-    if "user_proxy" in repo_cfg:
-        return bool(repo_cfg["user_proxy"])
+    """命令行等未传 WebSocket 参数时，是否走代理（看仓库/根配置 aliyun_proxy_enabled）。"""
     if "aliyun_proxy_enabled" in repo_cfg:
         return bool(repo_cfg["aliyun_proxy_enabled"])
     if cfg and isinstance(cfg, dict):
@@ -272,13 +306,16 @@ def resolve_proxy_choice(
     cfg: Optional[dict[str, Any]] = None,
     attempt: int = 1,
     proxy_index_override: Optional[int] = None,
+    client_use_proxy: Optional[bool] = None,
 ) -> Optional[ProxyChoice]:
     urls = _global_proxy_urls(cfg)
-    # 未配置任何代理 URL 时不报错：即使用户写了 user_proxy true 也仅表示「愿意走代理」，无 URL 则直连
     if not urls:
         return None
-    if not _proxy_enabled(repo_cfg, cfg):
+    if client_use_proxy is False:
         return None
+    if client_use_proxy is None:
+        if not _proxy_enabled(repo_cfg, cfg):
+            return None
     if proxy_index_override is not None:
         base_index = int(proxy_index_override)
     else:
@@ -320,6 +357,7 @@ def ensure_aliyun_login(
     dry_run: bool = False,
     attempt: int = 1,
     proxy_index_override: Optional[int] = None,
+    client_use_proxy: Optional[bool] = None,
 ) -> None:
     """
     参考旧工具流程：
@@ -334,6 +372,7 @@ def ensure_aliyun_login(
         cfg=cfg,
         attempt=attempt,
         proxy_index_override=proxy_index_override,
+        client_use_proxy=client_use_proxy,
     )
     if dry_run:
         if proxy_choice:
