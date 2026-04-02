@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -50,6 +51,13 @@ ROOT = Path(__file__).resolve().parent.parent
 BUILD_CONFIG_PATH = ROOT / "config" / "build" / "config.json"
 PUSH_RETRY_TIMES = 3
 LOGIN_RETRY_TIMES = 3
+
+
+@dataclass
+class ProxyChoice:
+    index: int
+    url: str
+    total: int
 
 
 def make_datetime_tag(project_key: str) -> str:
@@ -176,7 +184,143 @@ def _extract_auth_token(payload: Any) -> Optional[str]:
     return None
 
 
-def ensure_aliyun_login(repo_cfg: dict[str, Any], *, dry_run: bool = False) -> None:
+def _global_proxy_rows(cfg: Optional[dict[str, Any]]) -> list[tuple[int, str, str]]:
+    """
+    读取根配置 proxy 对象，返回未排序的 (sort_key, url, config_key) 列表。
+    """
+    if not cfg or not isinstance(cfg.get("proxy"), dict):
+        return []
+    px = cfg["proxy"]
+    rows: list[tuple[int, str, str]] = []
+    for name, node in px.items():
+        if not isinstance(node, dict):
+            continue
+        url = node.get("url")
+        if not isinstance(url, str) or not url.strip():
+            continue
+        idx_raw = node.get("index")
+        if idx_raw is None:
+            sort_key = 1_000_000
+        else:
+            try:
+                sort_key = int(idx_raw)
+            except (TypeError, ValueError):
+                sort_key = 1_000_000
+        rows.append((sort_key, url.strip(), str(name)))
+    return rows
+
+
+def _global_proxy_urls(cfg: Optional[dict[str, Any]]) -> list[str]:
+    """
+    按各条目的 index 升序排列；缺 index 的条目排在后面。
+    """
+    rows = _global_proxy_rows(cfg)
+    if not rows:
+        return []
+    rows.sort(key=lambda x: x[0])
+    return [u for _, u, _ in rows]
+
+
+def list_global_proxy_options(cfg: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    供前端展示：与 _global_proxy_urls 同序，每项含配置键名、URL、在列表中的下标。
+    """
+    rows = _global_proxy_rows(cfg)
+    if not rows:
+        return []
+    rows.sort(key=lambda x: x[0])
+    return [
+        {"key": k, "url": u, "list_index": i}
+        for i, (_sk, u, k) in enumerate(rows)
+    ]
+
+
+def _proxy_enabled(repo_cfg: dict[str, Any], cfg: Optional[dict[str, Any]]) -> bool:
+    if "user_proxy" in repo_cfg:
+        return bool(repo_cfg["user_proxy"])
+    if "aliyun_proxy_enabled" in repo_cfg:
+        return bool(repo_cfg["aliyun_proxy_enabled"])
+    if cfg and isinstance(cfg, dict):
+        return bool(cfg.get("aliyun_proxy_enabled", False))
+    return False
+
+
+def _proxy_base_index(repo_cfg: dict[str, Any], cfg: Optional[dict[str, Any]]) -> int:
+    raw = repo_cfg.get("aliyun_proxy_index")
+    if raw is None and cfg and isinstance(cfg, dict):
+        raw = cfg.get("aliyun_proxy_index", 0)
+    if raw is None:
+        raw = 0
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _proxy_auto_switch(repo_cfg: dict[str, Any], cfg: Optional[dict[str, Any]]) -> bool:
+    raw = repo_cfg.get("aliyun_proxy_auto_switch")
+    if raw is None and cfg and isinstance(cfg, dict):
+        raw = cfg.get("aliyun_proxy_auto_switch", False)
+    if raw is None:
+        return False
+    return bool(raw)
+
+
+def resolve_proxy_choice(
+    repo_cfg: dict[str, Any],
+    *,
+    cfg: Optional[dict[str, Any]] = None,
+    attempt: int = 1,
+    proxy_index_override: Optional[int] = None,
+) -> Optional[ProxyChoice]:
+    urls = _global_proxy_urls(cfg)
+    # 未配置任何代理 URL 时不报错：即使用户写了 user_proxy true 也仅表示「愿意走代理」，无 URL 则直连
+    if not urls:
+        return None
+    if not _proxy_enabled(repo_cfg, cfg):
+        return None
+    if proxy_index_override is not None:
+        base_index = int(proxy_index_override)
+    else:
+        base_index = _proxy_base_index(repo_cfg, cfg)
+    total = len(urls)
+    auto_switch = _proxy_auto_switch(repo_cfg, cfg)
+    offset = max(0, attempt - 1) if auto_switch else 0
+    index = (base_index + offset) % total
+    return ProxyChoice(index=index, url=urls[index], total=total)
+
+
+def build_proxy_env(
+    base_env: Optional[dict[str, str]],
+    choice: Optional[ProxyChoice],
+) -> Optional[dict[str, str]]:
+    if choice is None:
+        return None
+    env = dict(os.environ)
+    if base_env:
+        env.update(base_env)
+    proxy = choice.url
+    no_proxy = str(env.get("NO_PROXY", env.get("no_proxy", ""))).strip()
+    env["HTTP_PROXY"] = proxy
+    env["HTTPS_PROXY"] = proxy
+    env["ALL_PROXY"] = proxy
+    env["http_proxy"] = proxy
+    env["https_proxy"] = proxy
+    env["all_proxy"] = proxy
+    if no_proxy:
+        env["NO_PROXY"] = no_proxy
+        env["no_proxy"] = no_proxy
+    return env
+
+
+def ensure_aliyun_login(
+    repo_cfg: dict[str, Any],
+    *,
+    cfg: Optional[dict[str, Any]] = None,
+    dry_run: bool = False,
+    attempt: int = 1,
+    proxy_index_override: Optional[int] = None,
+) -> None:
     """
     参考旧工具流程：
       1) aliyun configure set
@@ -185,8 +329,20 @@ def ensure_aliyun_login(repo_cfg: dict[str, Any], *, dry_run: bool = False) -> N
     """
     if not is_aliyun_repo(repo_cfg):
         return
+    proxy_choice = resolve_proxy_choice(
+        repo_cfg,
+        cfg=cfg,
+        attempt=attempt,
+        proxy_index_override=proxy_index_override,
+    )
     if dry_run:
-        print(f"[状态] (dry-run) 跳过阿里云登录: {repo_cfg['ALIYUN_URL']}")
+        if proxy_choice:
+            print(
+                f"[状态] (dry-run) 跳过阿里云登录: {repo_cfg['ALIYUN_URL']} "
+                f"(代理 {proxy_choice.index + 1}/{proxy_choice.total}: {proxy_choice.url})"
+            )
+        else:
+            print(f"[状态] (dry-run) 跳过阿里云登录: {repo_cfg['ALIYUN_URL']}")
         return
     if not shutil.which("aliyun"):
         raise SystemExit("未检测到 aliyun 命令，请先安装阿里云 CLI 并确保在 PATH 中")
@@ -198,7 +354,13 @@ def ensure_aliyun_login(repo_cfg: dict[str, Any], *, dry_run: bool = False) -> N
     instance_id = str(repo_cfg["ALIYUN_KEY_STR"]).strip()
     registry = str(repo_cfg["ALIYUN_URL"]).strip()
 
+    if proxy_choice:
+        print(
+            f"[信息] 已启用代理: {proxy_choice.index + 1}/{proxy_choice.total} => "
+            f"{proxy_choice.url}"
+        )
     print(f"[信息] 阿里云登录准备: profile={profile}, region={region}, registry={registry}")
+    cmd_env = build_proxy_env(dict(), proxy_choice)
 
     cfg_cmd = [
         "aliyun",
@@ -216,7 +378,14 @@ def ensure_aliyun_login(repo_cfg: dict[str, Any], *, dry_run: bool = False) -> N
         sk,
     ]
     print("[状态] 正在配置阿里云 CLI")
-    subprocess.run(cfg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    subprocess.run(
+        cfg_cmd,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=cmd_env,
+    )
 
     token: Optional[str] = None
     for idx in range(3):
@@ -239,6 +408,7 @@ def ensure_aliyun_login(repo_cfg: dict[str, Any], *, dry_run: bool = False) -> N
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            env=cmd_env,
         )
         if result.returncode == 0:
             try:
@@ -252,14 +422,17 @@ def ensure_aliyun_login(repo_cfg: dict[str, Any], *, dry_run: bool = False) -> N
     if not token:
         raise SystemExit("获取阿里云镜像仓库授权 token 失败")
 
-    for attempt in range(1, LOGIN_RETRY_TIMES + 1):
-        print(f"[状态] 正在登录 Docker 仓库: {registry}（尝试 {attempt}/{LOGIN_RETRY_TIMES}）")
+    for login_attempt in range(1, LOGIN_RETRY_TIMES + 1):
+        print(
+            f"[状态] 正在登录 Docker 仓库: {registry}（尝试 {login_attempt}/{LOGIN_RETRY_TIMES}）"
+        )
         subprocess.run(
             ["docker", "logout", registry],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            env=cmd_env,
         )
         login_res = subprocess.run(
             ["docker", "login", "--username=cr_temp_user", f"--password={token}", registry],
@@ -267,13 +440,14 @@ def ensure_aliyun_login(repo_cfg: dict[str, Any], *, dry_run: bool = False) -> N
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            env=cmd_env,
         )
         if login_res.returncode == 0:
             print(f"[信息] 阿里云仓库登录成功: {registry}")
             return
-        if attempt < LOGIN_RETRY_TIMES:
+        if login_attempt < LOGIN_RETRY_TIMES:
             print("[WARN] Docker 登录失败，准备重试...")
-            time.sleep(attempt * 2)
+            time.sleep(login_attempt * 2)
     raise SystemExit(f"Docker 登录失败: {registry}")
 
 
@@ -491,7 +665,7 @@ def build_and_push(
         repo_cfg = repos_cfg.get(t.key) if isinstance(repos_cfg, dict) else None
         if isinstance(repo_cfg, dict) and t.key not in logged_in_repos and is_aliyun_repo(repo_cfg):
             print(f"[状态] 正在登录阿里云仓库 — {t.key}")
-            ensure_aliyun_login(repo_cfg, dry_run=dry_run)
+            ensure_aliyun_login(repo_cfg, cfg=cfg, dry_run=dry_run, attempt=1)
             logged_in_repos.add(t.key)
 
         image_with_tag = f"{t.full_name}:{tag}"
@@ -515,7 +689,21 @@ def build_and_push(
         push_ok = False
         for attempt in range(1, PUSH_RETRY_TIMES + 1):
             print(f"[状态] 推送尝试 {attempt}/{PUSH_RETRY_TIMES} — {image_with_tag}")
-            res = subprocess.run(push_cmd, check=False)
+            proxy_choice = (
+                resolve_proxy_choice(repo_cfg, cfg=cfg, attempt=attempt)
+                if isinstance(repo_cfg, dict) and is_aliyun_repo(repo_cfg)
+                else None
+            )
+            if proxy_choice:
+                print(
+                    f"[信息] 本次推送代理: {proxy_choice.index + 1}/{proxy_choice.total} => "
+                    f"{proxy_choice.url}"
+                )
+            res = subprocess.run(
+                push_cmd,
+                check=False,
+                env=build_proxy_env(dict(), proxy_choice),
+            )
             if res.returncode == 0:
                 push_ok = True
                 break
@@ -523,7 +711,12 @@ def build_and_push(
                 print(f"[WARN] docker push 失败，退出码: {res.returncode}，准备重试...")
                 if isinstance(repo_cfg, dict) and is_aliyun_repo(repo_cfg):
                     print(f"[状态] 推送失败后重新登录阿里云仓库 — {t.key}")
-                    ensure_aliyun_login(repo_cfg, dry_run=False)
+                    ensure_aliyun_login(
+                        repo_cfg,
+                        cfg=cfg,
+                        dry_run=False,
+                        attempt=attempt + 1,
+                    )
                 time.sleep(attempt * 2)
         if not push_ok:
             raise SystemExit(f"docker push 最终失败: {image_with_tag}")

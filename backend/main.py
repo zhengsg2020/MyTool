@@ -7,7 +7,7 @@ import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -66,6 +66,17 @@ def ensure_runtime_artifacts() -> None:
 
 
 ensure_runtime_artifacts()
+
+
+def _parse_proxy_index_override(query_params: Any) -> Optional[int]:
+    raw = query_params.get("proxy_index")
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return None
+
 
 _cors = os.environ.get("CORS_ORIGINS", "").strip()
 if _cors:
@@ -272,6 +283,7 @@ async def stream_command(
     cmd: list[str],
     *,
     cwd: str | None = None,
+    env: dict[str, str] | None = None,
     prefix: str = "",
     compact_docker_push: bool = False,
     persist_log: bool = True,
@@ -281,6 +293,7 @@ async def stream_command(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=cwd,
+        env=env,
     )
     assert proc.stdout is not None
     RUNNING_PROCS.add(proc)
@@ -422,6 +435,13 @@ async def get_build_history(
     return read_build_history(limit=limit)
 
 
+@app.get("/api/build/proxy-options")
+async def get_build_proxy_options():
+    """根配置 proxy 列表（含 url），供前端下拉展示。"""
+    cfg = build_push.load_build_config()
+    return build_push.list_global_proxy_options(cfg)
+
+
 @app.get("/api/build/debug-paths")
 async def get_build_debug_paths():
     root = runtime_root()
@@ -529,6 +549,8 @@ async def ws_build(websocket: WebSocket, project_name: str):
             await emit("FAILED")
             return
 
+        proxy_index_override = _parse_proxy_index_override(websocket.query_params)
+
         # 构建目录：~/{项目名}_home/{项目名}/x64_Env/LinuxRelease
         release_dir = build_push.release_dir_for_project(project_name)
         await emit(f"[状态] 准备中 — 项目: {project_name}")
@@ -594,7 +616,13 @@ async def ws_build(websocket: WebSocket, project_name: str):
             ):
                 await emit(f"[状态] 正在登录阿里云仓库 — {t.key}")
                 try:
-                    build_push.ensure_aliyun_login(repo_cfg, dry_run=False)
+                    build_push.ensure_aliyun_login(
+                        repo_cfg,
+                        cfg=cfg,
+                        dry_run=False,
+                        attempt=1,
+                        proxy_index_override=proxy_index_override,
+                    )
                 except Exception as exc:
                     if not hasattr(exc, "args") or not exc.args:
                         await emit("[ERROR] 阿里云登录失败：未知异常")
@@ -632,9 +660,29 @@ async def ws_build(websocket: WebSocket, project_name: str):
             push_cmd = ["docker", "push", image_with_tag]
             push_ok = False
             for attempt in range(1, 4):
+                proxy_choice = (
+                    build_push.resolve_proxy_choice(
+                        repo_cfg,
+                        cfg=cfg,
+                        attempt=attempt,
+                        proxy_index_override=proxy_index_override,
+                    )
+                    if isinstance(repo_cfg, dict) and build_push.is_aliyun_repo(repo_cfg)
+                    else None
+                )
+                if proxy_choice:
+                    await emit(
+                        f"[信息] 本次推送代理: {proxy_choice.index + 1}/{proxy_choice.total} => "
+                        f"{proxy_choice.url}"
+                    )
                 await emit(f"[状态] 推送尝试 {attempt}/3")
                 await emit(f"$ {' '.join(push_cmd)}")
-                rc = await stream_command(websocket, push_cmd, compact_docker_push=True)
+                rc = await stream_command(
+                    websocket,
+                    push_cmd,
+                    compact_docker_push=True,
+                    env=build_push.build_proxy_env(dict(), proxy_choice),
+                )
                 if rc == 0:
                     push_ok = True
                     break
@@ -654,7 +702,13 @@ async def ws_build(websocket: WebSocket, project_name: str):
                             f"[状态] 推送失败后重新登录阿里云仓库 — {t.key}"
                         )
                         try:
-                            build_push.ensure_aliyun_login(repo_cfg, dry_run=False)
+                            build_push.ensure_aliyun_login(
+                                repo_cfg,
+                                cfg=cfg,
+                                dry_run=False,
+                                attempt=attempt + 1,
+                                proxy_index_override=proxy_index_override,
+                            )
                         except Exception as exc:
                             await emit(
                                 f"[ERROR] 阿里云重登录失败（仓库 {t.key}）：{exc}"

@@ -8,6 +8,9 @@ const repoOptions = ref([]);
 const selectedRepos = ref([]);
 const logLines = ref([]);
 const buildHistory = ref([]);
+/** 根配置 proxy 列表，下拉展示完整 URL */
+const proxyOptions = ref([]);
+const selectedProxyIndex = ref(null);
 const showHistory = ref(false);
 const wsConnected = ref(false);
 const building = ref(false);
@@ -69,6 +72,29 @@ async function clearLog() {
     ElMessage.success("已清除构建日志文件");
   } catch (e) {
     ElMessage.error("清除日志失败: " + e.message);
+  }
+}
+
+function proxySelectLabel(opt) {
+  if (!opt || !opt.url) return "";
+  const k = opt.key ? ` — ${opt.key}` : "";
+  return `${opt.url}${k}`;
+}
+
+async function fetchProxyOptions() {
+  try {
+    const r = await fetch("/api/build/proxy-options");
+    if (!r.ok) {
+      proxyOptions.value = [];
+      return;
+    }
+    const data = await r.json();
+    proxyOptions.value = Array.isArray(data) ? data : [];
+    if (proxyOptions.value.length && selectedProxyIndex.value === null) {
+      selectedProxyIndex.value = proxyOptions.value[0].list_index;
+    }
+  } catch {
+    proxyOptions.value = [];
   }
 }
 
@@ -162,9 +188,17 @@ function startBuild() {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host;
   const reposParam = encodeURIComponent(selectedRepos.value.join(","));
-  const url = `${proto}//${host}/ws/build/${encodeURIComponent(
+  let url = `${proto}//${host}/ws/build/${encodeURIComponent(
     selected.value
   )}?repos=${reposParam}`;
+  if (
+    proxyOptions.value.length > 0 &&
+    selectedProxyIndex.value !== null &&
+    selectedProxyIndex.value !== undefined &&
+    selectedProxyIndex.value !== ""
+  ) {
+    url += `&proxy_index=${encodeURIComponent(String(selectedProxyIndex.value))}`;
+  }
   socket = new WebSocket(url);
 
   socket.onopen = () => {
@@ -228,7 +262,12 @@ async function cancelBuild() {
 }
 
 onMounted(async () => {
-  await Promise.all([fetchProjects(), fetchSavedLog(), fetchBuildHistory()]);
+  await Promise.all([
+    fetchProjects(),
+    fetchProxyOptions(),
+    fetchSavedLog(),
+    fetchBuildHistory(),
+  ]);
 });
 </script>
 
@@ -246,6 +285,23 @@ onMounted(async () => {
       >
         <el-option v-for="p in projects" :key="p" :label="p" :value="p" />
       </el-select>
+      <template v-if="proxyOptions.length > 0">
+        <div class="aside-subtitle">阿里云推送代理</div>
+        <el-select
+          v-model="selectedProxyIndex"
+          class="project-select"
+          placeholder="选择代理（显示完整 URL）"
+          filterable
+          :disabled="building"
+        >
+          <el-option
+            v-for="opt in proxyOptions"
+            :key="`${opt.key}-${opt.list_index}`"
+            :label="proxySelectLabel(opt)"
+            :value="opt.list_index"
+          />
+        </el-select>
+      </template>
       <div class="aside-subtitle">上传到仓库</div>
       <el-checkbox-group
         v-model="selectedRepos"
