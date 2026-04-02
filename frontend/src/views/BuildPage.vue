@@ -39,6 +39,12 @@ const statusType = computed(() => {
   return "info";
 });
 
+/** 当前勾选的仓库里是否存在 user_proxy: true（仅这些仓库会走下方所选代理） */
+const proxySelectionRelevant = computed(() => {
+  const set = new Set(selectedRepos.value);
+  return repoOptions.value.some((r) => set.has(r.key) && r.user_proxy);
+});
+
 function inferPhase(line) {
   if (line.includes("[状态] 准备中")) return "preparing";
   if (line.includes("[状态] 正在编译")) return "compiling";
@@ -154,7 +160,19 @@ async function fetchReposForSelected() {
     );
     if (!r.ok) throw new Error(await r.text());
     const data = await r.json();
-    repoOptions.value = Array.isArray(data) ? data : [];
+    if (!Array.isArray(data)) {
+      repoOptions.value = [];
+    } else {
+      repoOptions.value = data.map((row) => {
+        if (row && typeof row === "object" && typeof row.key === "string") {
+          return { key: row.key, user_proxy: !!row.user_proxy };
+        }
+        if (typeof row === "string") {
+          return { key: row, user_proxy: false };
+        }
+        return null;
+      }).filter(Boolean);
+    }
     // 默认不勾选，需用户手动选择
     selectedRepos.value = [];
   } catch (e) {
@@ -192,6 +210,7 @@ function startBuild() {
     selected.value
   )}?repos=${reposParam}`;
   if (
+    proxySelectionRelevant.value &&
     proxyOptions.value.length > 0 &&
     selectedProxyIndex.value !== null &&
     selectedProxyIndex.value !== undefined &&
@@ -285,14 +304,41 @@ onMounted(async () => {
       >
         <el-option v-for="p in projects" :key="p" :label="p" :value="p" />
       </el-select>
+      <div class="aside-subtitle">上传到仓库</div>
+      <el-checkbox-group
+        v-model="selectedRepos"
+        class="repo-group"
+        :disabled="building || !selected"
+      >
+        <el-checkbox
+          v-for="r in repoOptions"
+          :key="r.key"
+          :label="r.key"
+          class="repo-checkbox"
+        >
+          <span class="repo-label">{{ r.key }}</span>
+          <el-tag
+            v-if="r.user_proxy"
+            size="small"
+            type="warning"
+            effect="plain"
+            class="repo-proxy-tag"
+          >
+            代理
+          </el-tag>
+        </el-checkbox>
+      </el-checkbox-group>
       <template v-if="proxyOptions.length > 0">
-        <div class="aside-subtitle">阿里云推送代理</div>
+        <div class="aside-subtitle">推送代理</div>
+        <p class="proxy-hint">
+          仅勾选了带「代理」标的仓库（配置 <code class="proxy-code">user_proxy: true</code>）时启用；下拉框内为完整代理 URL。
+        </p>
         <el-select
           v-model="selectedProxyIndex"
-          class="project-select"
-          placeholder="选择代理（显示完整 URL）"
+          class="project-select proxy-select"
+          placeholder="选择代理 URL"
           filterable
-          :disabled="building"
+          :disabled="building || !selected || !proxySelectionRelevant"
         >
           <el-option
             v-for="opt in proxyOptions"
@@ -302,21 +348,6 @@ onMounted(async () => {
           />
         </el-select>
       </template>
-      <div class="aside-subtitle">上传到仓库</div>
-      <el-checkbox-group
-        v-model="selectedRepos"
-        class="repo-group"
-        :disabled="building || !selected"
-      >
-        <el-checkbox
-          v-for="r in repoOptions"
-          :key="r"
-          :label="r"
-          class="repo-checkbox"
-        >
-          {{ r }}
-        </el-checkbox>
-      </el-checkbox-group>
       <el-button
         type="primary"
         class="btn-build"
@@ -394,6 +425,34 @@ onMounted(async () => {
 }
 .repo-checkbox {
   margin-left: 0;
+  width: 100%;
+}
+.repo-checkbox :deep(.el-checkbox__label) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.repo-label {
+  word-break: break-all;
+}
+.repo-proxy-tag {
+  flex-shrink: 0;
+}
+.proxy-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #a6adc8;
+}
+.proxy-code {
+  font-family: ui-monospace, "Consolas", monospace;
+  font-size: 10px;
+  color: #f9e2af;
+}
+.proxy-select {
+  margin-bottom: 12px;
 }
 .btn-build {
   width: 100%;

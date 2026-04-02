@@ -390,8 +390,8 @@ async def list_projects():
 @app.get("/api/projects/{project_name}/repositories")
 async def list_project_repositories(project_name: str):
     """
-    返回某项目可用的仓库键列表，供前端勾选。
-    只返回诸如 "185_lnp_trunk"、"dragon_stg" 这样的 key，不暴露 ip 等信息。
+    返回某项目可选仓库列表，供前端勾选。
+    每项: { "key": 仓库键, "user_proxy": 是否对该仓库使用代理（仅表示开关，实际 URL 来自根配置 proxy） }。
     """
     cfg = build_push.load_build_config()
     projects = cfg.get("projects") or {}
@@ -404,10 +404,16 @@ async def list_project_repositories(project_name: str):
     if not isinstance(repo_keys, list):
         raise HTTPException(status_code=500, detail="项目 repositories 配置错误")
 
-    result: list[str] = []
+    repos_cfg = cfg.get("repositories") if isinstance(cfg.get("repositories"), dict) else {}
+    result: list[dict[str, Any]] = []
     for key in repo_keys:
-        if isinstance(key, str) and key:
-            result.append(key)
+        if not isinstance(key, str) or not key:
+            continue
+        item: dict[str, Any] = {"key": key, "user_proxy": False}
+        r_cfg = repos_cfg.get(key)
+        if isinstance(r_cfg, dict) and "user_proxy" in r_cfg:
+            item["user_proxy"] = bool(r_cfg["user_proxy"])
+        result.append(item)
     return result
 
 
