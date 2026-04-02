@@ -4,7 +4,8 @@ from __future__ import annotations
 """
 游服镜像打包推送脚本
 
-根据 config/build/config.json 中的配置，为指定项目构建并推送镜像。
+根据构建配置文件（默认同根目录 config.json 中 config_files.build，否则为 config/build/config.json）
+为指定项目构建并推送镜像。根级 proxy 仅为 URL 字符串数组或带 url/index 的对象数组。
 
 镜像完整名称规则：
   - 仓库地址：从 repositories[*] 中解析
@@ -47,10 +48,44 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
 
-ROOT = Path(__file__).resolve().parent.parent
-BUILD_CONFIG_PATH = ROOT / "config" / "build" / "config.json"
 PUSH_RETRY_TIMES = 3
 LOGIN_RETRY_TIMES = 3
+
+
+def runtime_root() -> Path:
+    """与 main.run_server 一致：源码目录为仓库根；打包后为 exe 所在目录。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def _resolved_build_config_path() -> Path:
+    """
+    实际使用的构建配置路径：优先读 CONFIG_PATH 指向的根 config.json 里的 config_files.build，
+    否则为 <runtime_root>/config/build/config.json。
+    """
+    default = runtime_root() / "config" / "build" / "config.json"
+    raw = os.environ.get("CONFIG_PATH", "").strip()
+    root_path = Path(raw) if raw else runtime_root() / "config.json"
+    if not root_path.is_file():
+        return default
+    try:
+        with root_path.open(encoding="utf-8") as f:
+            root_cfg = json.load(f)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return default
+    if not isinstance(root_cfg, dict):
+        return default
+    refs = root_cfg.get("config_files")
+    if not isinstance(refs, dict):
+        return default
+    ref = refs.get("build")
+    if not isinstance(ref, str) or not ref.strip():
+        return default
+    p = Path(ref.strip())
+    if p.is_absolute():
+        return p
+    return (runtime_root() / p).resolve()
 
 
 @dataclass
@@ -65,7 +100,22 @@ def make_datetime_tag(project_key: str) -> str:
     return f"{project_key}_{datetime.now().strftime('%y%m%d_%H%M%S')}"
 
 
-def load_build_config(path: Path = BUILD_CONFIG_PATH) -> dict[str, Any]:
+def try_load_build_config() -> Optional[dict[str, Any]]:
+    """供 HTTP 接口使用：读失败返回 None，不抛 SystemExit。"""
+    path = _resolved_build_config_path()
+    if not path.is_file():
+        return None
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def load_build_config(path: Optional[Path] = None) -> dict[str, Any]:
+    if path is None:
+        path = _resolved_build_config_path()
     if not path.is_file():
         raise SystemExit(f"配置文件不存在: {path}")
     try:
@@ -186,69 +236,42 @@ def _extract_auth_token(payload: Any) -> Optional[str]:
 
 def _global_proxy_rows(cfg: Optional[dict[str, Any]]) -> list[tuple[int, str, str]]:
     """
-    读取根配置 proxy，返回未排序的 (sort_key, url, stable_id) 列表。
-
-    支持三种写法（可混用迁移期，建议新配置用数组）：
-      1) 数组：["http://a:1080", "http://b:1080"] — 顺序即优先级
-      2) 数组对象：[{ "url": "...", "index": 0 }, ...] — 按 index 升序，缺 index 时用数组下标
-      3) 旧版对象：{ "proxy1": { "url": "...", "index": 0 }, ... }
+    根配置 proxy 仅支持数组：
+      - ["http://a:1080", "http://b:1080"] — 书写顺序即下拉顺序
+      - [{ "url": "...", "index": 0 }, ...] — 按 index 升序；缺 index 时用数组下标
     """
     if not cfg:
         return []
     px = cfg.get("proxy")
-    if px is None:
+    if not isinstance(px, list):
         return []
     rows: list[tuple[int, str, str]] = []
-
-    if isinstance(px, list):
-        for i, item in enumerate(px):
-            if isinstance(item, str):
-                u = item.strip()
-                if not u:
-                    continue
-                rows.append((i, u, f"#{i}"))
-            elif isinstance(item, dict):
-                url = item.get("url")
-                if not isinstance(url, str) or not url.strip():
-                    continue
-                u = url.strip()
-                idx_raw = item.get("index")
-                if idx_raw is None:
-                    sort_key = i
-                else:
-                    try:
-                        sort_key = int(idx_raw)
-                    except (TypeError, ValueError):
-                        sort_key = i
-                sid = item.get("id") or item.get("name") or f"#{i}"
-                rows.append((sort_key, u, str(sid)))
-        return rows
-
-    if isinstance(px, dict):
-        for name, node in px.items():
-            if not isinstance(node, dict):
+    for i, item in enumerate(px):
+        if isinstance(item, str):
+            u = item.strip()
+            if not u:
                 continue
-            url = node.get("url")
+            rows.append((i, u, f"#{i}"))
+        elif isinstance(item, dict):
+            url = item.get("url")
             if not isinstance(url, str) or not url.strip():
                 continue
-            idx_raw = node.get("index")
+            u = url.strip()
+            idx_raw = item.get("index")
             if idx_raw is None:
-                sort_key = 1_000_000
+                sort_key = i
             else:
                 try:
                     sort_key = int(idx_raw)
                 except (TypeError, ValueError):
-                    sort_key = 1_000_000
-            rows.append((sort_key, url.strip(), str(name)))
-        return rows
-
-    return []
+                    sort_key = i
+            sid = item.get("id") or item.get("name") or f"#{i}"
+            rows.append((sort_key, u, str(sid)))
+    return rows
 
 
 def _global_proxy_urls(cfg: Optional[dict[str, Any]]) -> list[str]:
-    """
-    排序规则：有 index 的按 index 升序；旧版对象里缺 index 的排在后面；纯字符串数组按书写顺序。
-    """
+    """纯字符串项按数组顺序；带 index 的对象项按 index 升序。"""
     rows = _global_proxy_rows(cfg)
     if not rows:
         return []

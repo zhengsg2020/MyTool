@@ -453,7 +453,9 @@ async def get_build_history(
 @app.get("/api/build/proxy-options")
 async def get_build_proxy_options():
     """根配置 proxy 列表（含 url），供前端下拉展示。"""
-    cfg = build_push.load_build_config()
+    cfg = build_push.try_load_build_config()
+    if cfg is None:
+        return []
     return build_push.list_global_proxy_options(cfg)
 
 
