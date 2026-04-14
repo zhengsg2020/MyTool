@@ -239,11 +239,13 @@ onMounted(async () => {
   column-gap: 10px;
   min-height: 34px;
   padding: 0 6px;
+  font-size: 15px;
+  line-height: 1.65;
   transition: background-color 0.18s ease;
 }
 .site-tree-site:hover,
 .site-tree-site:focus-within {
-  background: #00bcd4;
+  background: #80deea;
 }
 .site-tree-site:hover .site-tree-main,
 .site-tree-site:hover .site-tree-url,
@@ -251,7 +253,7 @@ onMounted(async () => {
 .site-tree-site:focus-within .site-tree-main,
 .site-tree-site:focus-within .site-tree-url,
 .site-tree-site:focus-within .site-tree-cred {
-  color: #00333a;
+  color: #11444b;
 }
 .site-tree-site:hover :deep(.el-button),
 .site-tree-site:focus-within :deep(.el-button) {
