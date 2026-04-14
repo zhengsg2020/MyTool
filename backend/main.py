@@ -41,6 +41,7 @@ def frontend_dist_dir() -> Path:
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", runtime_root() / "config.json"))
 DEFAULT_BUILD_CONFIG_PATH = runtime_root() / "config" / "build" / "config.json"
 DEFAULT_SITES_CONFIG_PATH = runtime_root() / "config" / "sites" / "sites.json"
+DEFAULT_SITE_CATEGORIES_PATH = runtime_root() / "config" / "sites" / "categories.json"
 BUILD_LOG_PATH = runtime_root() / "logs" / "build.log"
 BUILD_HISTORY_PATH = runtime_root() / "logs" / "build_history.json"
 BUILD_HISTORY_LOG_PATH = runtime_root() / "logs" / "build_history.log"
@@ -252,11 +253,103 @@ def save_sites(sites: list[dict[str, Any]]) -> None:
     save_json_file(sites_path, sites)
 
 
+def site_categories_path() -> Path:
+    return DEFAULT_SITE_CATEGORIES_PATH
+
+
+def load_site_categories() -> list[dict[str, Any]]:
+    data = load_json_file(site_categories_path(), [])
+    if not isinstance(data, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in data:
+        if isinstance(item, dict):
+            result.append(item)
+    return result
+
+
+def save_site_categories(categories: list[dict[str, Any]]) -> None:
+    save_json_file(site_categories_path(), categories)
+
+
+def normalize_categories(categories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for idx, item in enumerate(categories):
+        cid = str(item.get("id", "")).strip()
+        if not cid:
+            continue
+        pid_raw = item.get("parent_id")
+        pid = str(pid_raw).strip() if isinstance(pid_raw, str) else None
+        if not pid:
+            pid = None
+        name = str(item.get("name", "")).strip()
+        if not name:
+            name = "未命名类型"
+        sort = item.get("sort", idx)
+        if not isinstance(sort, int):
+            sort = idx
+        normalized.append(
+            {
+                "id": cid,
+                "name": name,
+                "parent_id": pid,
+                "sort": sort,
+                "created_at": str(item.get("created_at", "")),
+            }
+        )
+    return normalized
+
+
+def build_category_tree(flat_categories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    nodes: dict[str, dict[str, Any]] = {}
+    for item in flat_categories:
+        nodes[item["id"]] = {
+            "id": item["id"],
+            "name": item["name"],
+            "parent_id": item["parent_id"],
+            "sort": item["sort"],
+            "created_at": item.get("created_at", ""),
+            "children": [],
+        }
+
+    roots: list[dict[str, Any]] = []
+    for node in nodes.values():
+        parent_id = node.get("parent_id")
+        if parent_id and parent_id in nodes and parent_id != node["id"]:
+            nodes[parent_id]["children"].append(node)
+        else:
+            roots.append(node)
+
+    def sort_nodes(items: list[dict[str, Any]]) -> None:
+        items.sort(key=lambda x: (x.get("sort", 0), x.get("created_at", ""), x.get("name", "")))
+        for it in items:
+            sort_nodes(it["children"])
+
+    sort_nodes(roots)
+    return roots
+
+
+def flatten_category_tree(
+    tree_nodes: list[dict[str, Any]], parent_id: Optional[str] = None
+) -> list[dict[str, Any]]:
+    flat: list[dict[str, Any]] = []
+    for idx, node in enumerate(tree_nodes):
+        node_id = str(node.get("id", "")).strip()
+        if not node_id:
+            continue
+        flat.append({"id": node_id, "parent_id": parent_id, "sort": idx})
+        children = node.get("children")
+        if isinstance(children, list) and children:
+            flat.extend(flatten_category_tree(children, node_id))
+    return flat
+
+
 class SiteCreate(BaseModel):
     name: str = ""
     url: str = Field(min_length=1)
     username: str = ""
     password: str = ""
+    category_id: str = ""
 
     @field_validator("name")
     @classmethod
@@ -271,7 +364,7 @@ class SiteCreate(BaseModel):
             raise ValueError("字段不能为空")
         return text
 
-    @field_validator("username", "password")
+    @field_validator("username", "password", "category_id")
     @classmethod
     def trim_optional_text(cls, value: str) -> str:
         return value.strip()
@@ -291,7 +384,42 @@ class SiteOut(BaseModel):
     url: str
     username: str
     password: str
+    category_id: str = ""
     created_at: str
+
+
+class SiteCategoryCreate(BaseModel):
+    name: str = Field(min_length=1)
+    parent_id: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("name 不能为空")
+        return text
+
+    @field_validator("parent_id")
+    @classmethod
+    def trim_parent_id(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
+
+
+class SiteCategoryReorder(BaseModel):
+    tree: list[dict[str, Any]]
+
+
+class SiteCategoryAssign(BaseModel):
+    category_id: str = ""
+
+    @field_validator("category_id")
+    @classmethod
+    def trim_category_id(cls, value: str) -> str:
+        return value.strip()
 
 
 async def stream_command(
@@ -497,12 +625,18 @@ async def list_sites():
 @app.post("/api/sites", response_model=SiteOut)
 async def create_site(payload: SiteCreate):
     sites = load_sites()
+    if payload.category_id:
+        categories = normalize_categories(load_site_categories())
+        valid_ids = {x["id"] for x in categories}
+        if payload.category_id not in valid_ids:
+            raise HTTPException(status_code=400, detail="category_id 不存在")
     site = SiteOut(
         id=str(uuid.uuid4()),
         name=payload.name,
         url=payload.url,
         username=payload.username,
         password=payload.password,
+        category_id=payload.category_id,
         created_at=datetime.now().isoformat(timespec="seconds"),
     )
     sites.append(site.model_dump())
@@ -519,6 +653,99 @@ async def delete_site(site_id: str):
     if len(new_sites) == len(sites):
         raise HTTPException(status_code=404, detail="site not found")
     save_sites(new_sites)
+    return {"ok": True}
+
+
+@app.put("/api/sites/{site_id}/category")
+async def assign_site_category(site_id: str, payload: SiteCategoryAssign):
+    sites = load_sites()
+    if not sites:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    category_id = payload.category_id
+    if category_id:
+        categories = normalize_categories(load_site_categories())
+        valid_ids = {x["id"] for x in categories}
+        if category_id not in valid_ids:
+            raise HTTPException(status_code=400, detail="category_id 不存在")
+
+    hit = False
+    updated_sites: list[dict[str, Any]] = []
+    for item in sites:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id", "")).strip() == site_id:
+            item["category_id"] = category_id
+            hit = True
+        updated_sites.append(item)
+
+    if not hit:
+        raise HTTPException(status_code=404, detail="site not found")
+    save_sites(updated_sites)
+    return {"ok": True}
+
+
+@app.get("/api/site-categories")
+async def list_site_categories():
+    categories = normalize_categories(load_site_categories())
+    return build_category_tree(categories)
+
+
+@app.post("/api/site-categories")
+async def create_site_category(payload: SiteCategoryCreate):
+    categories = normalize_categories(load_site_categories())
+    if payload.parent_id:
+        ids = {x["id"] for x in categories}
+        if payload.parent_id not in ids:
+            raise HTTPException(status_code=400, detail="parent_id 不存在")
+
+    new_category = {
+        "id": str(uuid.uuid4()),
+        "name": payload.name,
+        "parent_id": payload.parent_id,
+        "sort": 999999,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    categories.append(new_category)
+    save_site_categories(categories)
+    return new_category
+
+
+@app.put("/api/site-categories/reorder")
+async def reorder_site_categories(payload: SiteCategoryReorder):
+    categories = normalize_categories(load_site_categories())
+    categories_by_id = {x["id"]: x for x in categories}
+    flat = flatten_category_tree(payload.tree)
+    if not flat:
+        raise HTTPException(status_code=400, detail="tree 不能为空")
+
+    incoming_ids = [x["id"] for x in flat]
+    saved_ids = set(categories_by_id.keys())
+    if set(incoming_ids) != saved_ids:
+        raise HTTPException(status_code=400, detail="tree 节点与已保存类型不一致")
+
+    for item in flat:
+        cur = categories_by_id[item["id"]]
+        cur["parent_id"] = item["parent_id"]
+        cur["sort"] = item["sort"]
+    save_site_categories(list(categories_by_id.values()))
+    return {"ok": True}
+
+
+@app.delete("/api/site-categories/{category_id}")
+async def delete_site_category(category_id: str):
+    categories = normalize_categories(load_site_categories())
+    if not categories:
+        raise HTTPException(status_code=404, detail="category not found")
+    if any(x.get("parent_id") == category_id for x in categories):
+        raise HTTPException(status_code=400, detail="请先删除子类型")
+    sites = load_sites()
+    if any(str(x.get("category_id", "")).strip() == category_id for x in sites if isinstance(x, dict)):
+        raise HTTPException(status_code=400, detail="该类型下仍有网站")
+    new_categories = [x for x in categories if x["id"] != category_id]
+    if len(new_categories) == len(categories):
+        raise HTTPException(status_code=404, detail="category not found")
+    save_site_categories(new_categories)
     return {"ok": True}
 
 
