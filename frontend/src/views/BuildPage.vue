@@ -10,9 +10,12 @@ const logLines = ref([]);
 const buildHistory = ref([]);
 /** 根配置 proxy 列表，下拉展示完整 URL */
 const proxyOptions = ref([]);
-const selectedProxyIndex = ref(null);
-/** 页面勾选：本次构建推送阿里云时是否使用下方所选代理 */
+const selectedPushProxyIndex = ref(null);
+const selectedBuildProxyIndex = ref(null);
+/** 页面勾选：推送阿里云时是否使用代理 */
 const usePushProxy = ref(false);
+/** 页面勾选：docker build 时是否使用代理 */
+const useBuildProxy = ref(false);
 const showHistory = ref(false);
 const wsConnected = ref(false);
 const building = ref(false);
@@ -90,8 +93,13 @@ async function fetchProxyOptions() {
     }
     const data = await r.json();
     proxyOptions.value = Array.isArray(data) ? data : [];
-    if (proxyOptions.value.length && selectedProxyIndex.value === null) {
-      selectedProxyIndex.value = proxyOptions.value[0].list_index;
+    if (proxyOptions.value.length) {
+      if (selectedPushProxyIndex.value === null) {
+        selectedPushProxyIndex.value = proxyOptions.value[0].list_index;
+      }
+      if (selectedBuildProxyIndex.value === null) {
+        selectedBuildProxyIndex.value = proxyOptions.value[0].list_index;
+      }
     }
   } catch {
     proxyOptions.value = [];
@@ -203,15 +211,25 @@ function startBuild() {
   let url = `${proto}//${host}/ws/build/${encodeURIComponent(
     selected.value
   )}?repos=${reposParam}`;
-  url += `&use_proxy=${usePushProxy.value ? "1" : "0"}`;
+  url += `&use_push_proxy=${usePushProxy.value ? "1" : "0"}`;
+  url += `&use_build_proxy=${useBuildProxy.value ? "1" : "0"}`;
   if (
     usePushProxy.value &&
     proxyOptions.value.length > 0 &&
-    selectedProxyIndex.value !== null &&
-    selectedProxyIndex.value !== undefined &&
-    selectedProxyIndex.value !== ""
+    selectedPushProxyIndex.value !== null &&
+    selectedPushProxyIndex.value !== undefined &&
+    selectedPushProxyIndex.value !== ""
   ) {
-    url += `&proxy_index=${encodeURIComponent(String(selectedProxyIndex.value))}`;
+    url += `&push_proxy_index=${encodeURIComponent(String(selectedPushProxyIndex.value))}`;
+  }
+  if (
+    useBuildProxy.value &&
+    proxyOptions.value.length > 0 &&
+    selectedBuildProxyIndex.value !== null &&
+    selectedBuildProxyIndex.value !== undefined &&
+    selectedBuildProxyIndex.value !== ""
+  ) {
+    url += `&build_proxy_index=${encodeURIComponent(String(selectedBuildProxyIndex.value))}`;
   }
   socket = new WebSocket(url);
 
@@ -324,13 +342,35 @@ onMounted(async () => {
         开始构建
       </el-button>
       <el-button class="btn-clear" :disabled="building" @click="clearLog">清除日志</el-button>
+      <div class="aside-subtitle proxy-section-title">构建代理</div>
+      <el-checkbox v-model="useBuildProxy" class="proxy-toggle" :disabled="building">
+        docker build 时使用代理
+      </el-checkbox>
+      <el-select
+        v-if="proxyOptions.length > 0"
+        v-model="selectedBuildProxyIndex"
+        class="project-select proxy-select"
+        placeholder="选择构建代理 URL（完整地址）"
+        filterable
+        :disabled="building || !useBuildProxy"
+      >
+        <el-option
+          v-for="opt in proxyOptions"
+          :key="`build-${opt.list_index}-${opt.url}`"
+          :label="proxySelectLabel(opt)"
+          :value="opt.list_index"
+        />
+      </el-select>
+      <p v-if="proxyOptions.length > 0" class="proxy-hint-bottom">
+        仅影响 <strong>docker build</strong> 取基础镜像与网络访问，不影响推送阶段。
+      </p>
       <div class="aside-subtitle proxy-section-title">推送代理</div>
       <el-checkbox v-model="usePushProxy" class="proxy-toggle" :disabled="building">
         推送阿里云时使用代理
       </el-checkbox>
       <el-select
         v-if="proxyOptions.length > 0"
-        v-model="selectedProxyIndex"
+        v-model="selectedPushProxyIndex"
         class="project-select proxy-select"
         placeholder="选择代理 URL（完整地址）"
         filterable
@@ -338,7 +378,7 @@ onMounted(async () => {
       >
         <el-option
           v-for="opt in proxyOptions"
-          :key="`${opt.list_index}-${opt.url}`"
+          :key="`push-${opt.list_index}-${opt.url}`"
           :label="proxySelectLabel(opt)"
           :value="opt.list_index"
         />

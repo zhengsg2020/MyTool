@@ -350,6 +350,28 @@ def resolve_proxy_choice(
     return ProxyChoice(index=index, url=urls[index], total=total)
 
 
+def resolve_global_proxy_choice(
+    *,
+    cfg: Optional[dict[str, Any]] = None,
+    proxy_index_override: Optional[int] = None,
+    client_use_proxy: Optional[bool] = None,
+) -> Optional[ProxyChoice]:
+    """
+    构建阶段（docker build）使用：仅看根 proxy 列表与页面勾选，不依赖仓库配置。
+    """
+    urls = _global_proxy_urls(cfg)
+    if not urls:
+        return None
+    if client_use_proxy is False:
+        return None
+    if client_use_proxy is None:
+        return None
+    base_index = int(proxy_index_override) if proxy_index_override is not None else 0
+    total = len(urls)
+    index = base_index % total
+    return ProxyChoice(index=index, url=urls[index], total=total)
+
+
 def build_proxy_env(
     base_env: Optional[dict[str, str]],
     choice: Optional[ProxyChoice],

@@ -69,8 +69,8 @@ def ensure_runtime_artifacts() -> None:
 ensure_runtime_artifacts()
 
 
-def _parse_proxy_index_override(query_params: Any) -> Optional[int]:
-    raw = query_params.get("proxy_index")
+def _parse_proxy_index_override(query_params: Any, key: str) -> Optional[int]:
+    raw = query_params.get(key)
     if raw is None or raw == "":
         return None
     try:
@@ -79,12 +79,12 @@ def _parse_proxy_index_override(query_params: Any) -> Optional[int]:
         return None
 
 
-def _parse_use_proxy_flag(query_params: Any) -> Optional[bool]:
+def _parse_use_proxy_flag(query_params: Any, key: str) -> Optional[bool]:
     """
-    WebSocket 查询参数 use_proxy：1/true 表示页面勾选使用代理；0/false 表示不用。
-    未传则 None，后端沿用配置文件 aliyun_proxy_enabled（兼容旧前端/脚本）。
+    WebSocket 查询参数：1/true 表示页面勾选使用代理；0/false 表示不用。
+    未传则 None，后端按各阶段默认策略处理。
     """
-    raw = query_params.get("use_proxy")
+    raw = query_params.get(key)
     if raw is None or raw == "":
         return None
     s = str(raw).strip().lower()
@@ -793,8 +793,28 @@ async def ws_build(websocket: WebSocket, project_name: str):
             await emit("FAILED")
             return
 
-        proxy_index_override = _parse_proxy_index_override(websocket.query_params)
-        client_use_proxy = _parse_use_proxy_flag(websocket.query_params)
+        # 推送代理（兼容旧参数 use_proxy/proxy_index）
+        push_proxy_index_override = _parse_proxy_index_override(
+            websocket.query_params, "push_proxy_index"
+        )
+        if push_proxy_index_override is None:
+            push_proxy_index_override = _parse_proxy_index_override(
+                websocket.query_params, "proxy_index"
+            )
+        client_use_push_proxy = _parse_use_proxy_flag(
+            websocket.query_params, "use_push_proxy"
+        )
+        if client_use_push_proxy is None:
+            client_use_push_proxy = _parse_use_proxy_flag(
+                websocket.query_params, "use_proxy"
+            )
+        # 构建代理（docker build）
+        build_proxy_index_override = _parse_proxy_index_override(
+            websocket.query_params, "build_proxy_index"
+        )
+        client_use_build_proxy = _parse_use_proxy_flag(
+            websocket.query_params, "use_build_proxy"
+        )
 
         # 构建目录：~/{项目名}_home/{项目名}/x64_Env/LinuxRelease
         release_dir = build_push.release_dir_for_project(project_name)
@@ -840,8 +860,23 @@ async def ws_build(websocket: WebSocket, project_name: str):
         local_image = f"{project_name}:{tag}"
         await emit(f"[状态] 正在打包本地镜像 — {local_image}")
         local_build_cmd = ["docker", "build", "-t", local_image, "."]
+        build_proxy_choice = build_push.resolve_global_proxy_choice(
+            cfg=cfg,
+            proxy_index_override=build_proxy_index_override,
+            client_use_proxy=client_use_build_proxy,
+        )
+        if build_proxy_choice:
+            await emit(
+                f"[信息] 本次构建代理: {build_proxy_choice.index + 1}/{build_proxy_choice.total} => "
+                f"{build_proxy_choice.url}"
+            )
         await emit(f"$ cd {release_dir} && {' '.join(local_build_cmd)}")
-        rc = await stream_command(websocket, local_build_cmd, cwd=str(release_dir))
+        rc = await stream_command(
+            websocket,
+            local_build_cmd,
+            cwd=str(release_dir),
+            env=build_push.build_proxy_env(dict(), build_proxy_choice),
+        )
         if rc != 0:
             if rc == 130:
                 await emit("[WARN] 构建已被手动终止。")
@@ -866,8 +901,8 @@ async def ws_build(websocket: WebSocket, project_name: str):
                         cfg=cfg,
                         dry_run=False,
                         attempt=1,
-                        proxy_index_override=proxy_index_override,
-                        client_use_proxy=client_use_proxy,
+                        proxy_index_override=push_proxy_index_override,
+                        client_use_proxy=client_use_push_proxy,
                     )
                 except Exception as exc:
                     if not hasattr(exc, "args") or not exc.args:
@@ -911,8 +946,8 @@ async def ws_build(websocket: WebSocket, project_name: str):
                         repo_cfg,
                         cfg=cfg,
                         attempt=attempt,
-                        proxy_index_override=proxy_index_override,
-                        client_use_proxy=client_use_proxy,
+                        proxy_index_override=push_proxy_index_override,
+                        client_use_proxy=client_use_push_proxy,
                     )
                     if isinstance(repo_cfg, dict) and build_push.is_aliyun_repo(repo_cfg)
                     else None
@@ -954,8 +989,8 @@ async def ws_build(websocket: WebSocket, project_name: str):
                                 cfg=cfg,
                                 dry_run=False,
                                 attempt=attempt + 1,
-                                proxy_index_override=proxy_index_override,
-                                client_use_proxy=client_use_proxy,
+                                proxy_index_override=push_proxy_index_override,
+                                client_use_proxy=client_use_push_proxy,
                             )
                         except Exception as exc:
                             await emit(
