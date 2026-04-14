@@ -192,7 +192,7 @@ onMounted(async () => {
             <span class="site-tree-url">{{ data.site.url }}</span>
             <span class="site-tree-cred">{{ data.site.username || "-" }}</span>
             <span class="site-tree-cred">{{ data.site.password ? "******" : "" }}</span>
-            <el-space wrap>
+            <el-space class="site-tree-actions">
               <el-button size="small" type="primary" plain @click="openSite(data.site.url)">访问网站</el-button>
               <el-button size="small" :disabled="!data.site.username" @click="copyText(data.site.username, '账号')">
                 复制账号
@@ -233,19 +233,50 @@ onMounted(async () => {
 }
 .site-tree-site {
   width: 100%;
-  display: flex;
+  display: grid;
+  grid-template-columns: 140px minmax(320px, 1fr) 120px 80px 260px;
   align-items: center;
-  gap: 10px;
+  column-gap: 10px;
+  min-height: 34px;
+  padding: 0 6px;
+  transition: background-color 0.18s ease;
 }
-.site-tree-main {
-  min-width: 120px;
+.site-tree-site:hover,
+.site-tree-site:focus-within {
+  background: #00bcd4;
+}
+.site-tree-site:hover .site-tree-main,
+.site-tree-site:hover .site-tree-url,
+.site-tree-site:hover .site-tree-cred,
+.site-tree-site:focus-within .site-tree-main,
+.site-tree-site:focus-within .site-tree-url,
+.site-tree-site:focus-within .site-tree-cred {
+  color: #00333a;
+}
+.site-tree-site:hover :deep(.el-button),
+.site-tree-site:focus-within :deep(.el-button) {
+  border-color: #0097a7;
+}
+.site-tree-site:hover :deep(.el-button--primary.is-plain),
+.site-tree-site:focus-within :deep(.el-button--primary.is-plain) {
+  background: #0097a7;
+  color: #fff;
+  transition: background-color 0.18s ease;
+}
+.site-tree-main,
+.site-tree-url,
+.site-tree-cred {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .site-tree-url {
-  min-width: 260px;
   color: #606266;
 }
 .site-tree-cred {
-  min-width: 80px;
   color: #909399;
+}
+.site-tree-actions {
+  white-space: nowrap;
 }
 </style>
