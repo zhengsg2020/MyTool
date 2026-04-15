@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import uuid
 from datetime import datetime
@@ -443,60 +444,87 @@ async def stream_command(
     RUNNING_PROCS.add(proc)
     waiting_layers: set[str] = set()
     pushed_layers: set[str] = set()
+    mounted_layers: set[str] = set()
+    active_layers: set[str] = set()
+    known_layers: set[str] = set()
     last_progress_text = ""
+    push_line_pattern = re.compile(r"^([0-9a-f]{6,64}):\s*(.+)$")
 
-    while True:
-        if BUILD_CANCEL_EVENT.is_set():
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
-            break
-        line = await proc.stdout.readline()
-        if not line:
-            break
-        text = line.decode(errors="replace")
-        raw = text.rstrip("\n\r")
+    websocket_broken = False
+    try:
+        while True:
+            if BUILD_CANCEL_EVENT.is_set():
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+                break
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode(errors="replace")
+            raw = text.rstrip("\n\r")
 
-        # 压缩 docker push 的 Waiting 刷屏，改成进度摘要日志
-        if compact_docker_push:
-            # 示例: a6aba25925bc: Waiting
-            if ":" in raw:
-                layer_id, status = raw.split(":", 1)
-                layer_id = layer_id.strip()
-                status = status.strip()
-                if layer_id and status == "Waiting":
-                    waiting_layers.add(layer_id)
+            # 压缩 docker push 刷屏，改成可感知的进度摘要日志
+            if compact_docker_push:
+                matched = push_line_pattern.match(raw)
+                if matched:
+                    layer_id = matched.group(1).strip()
+                    status = matched.group(2).strip()
+                    if layer_id:
+                        known_layers.add(layer_id)
+
+                    if status == "Waiting":
+                        waiting_layers.add(layer_id)
+                        active_layers.discard(layer_id)
+                    elif status.startswith("Pushing "):
+                        waiting_layers.discard(layer_id)
+                        active_layers.add(layer_id)
+                    elif status.startswith("Pushed"):
+                        waiting_layers.discard(layer_id)
+                        active_layers.discard(layer_id)
+                        pushed_layers.add(layer_id)
+                    elif status.startswith("Layer already exists") or status.startswith(
+                        "Mounted from "
+                    ):
+                        waiting_layers.discard(layer_id)
+                        active_layers.discard(layer_id)
+                        mounted_layers.add(layer_id)
+                    elif status.startswith("Preparing"):
+                        waiting_layers.add(layer_id)
+                        active_layers.discard(layer_id)
+
+                    done_layers = pushed_layers | mounted_layers
+                    total_layers = max(len(known_layers), len(done_layers))
+                    done_count = len(done_layers)
+                    percent = 100.0 if total_layers == 0 else (done_count * 100.0 / total_layers)
                     progress = (
-                        f"[进度] docker push 等待中: {len(waiting_layers)} 层"
-                        f" | 已完成: {len(pushed_layers)} 层"
+                        f"[进度] docker push: 已完成 {done_count}/{total_layers} "
+                        f"({percent:.0f}%) | 上传中 {len(active_layers)} 层 | 等待 {len(waiting_layers)} 层"
                     )
                     if progress != last_progress_text:
-                        await websocket.send_text(progress)
+                        if not websocket_broken:
+                            try:
+                                await websocket.send_text(progress)
+                            except Exception:
+                                websocket_broken = True
                         if persist_log:
                             append_build_log(progress)
                         last_progress_text = progress
                     continue
-                if layer_id and status.startswith("Pushed"):
-                    pushed_layers.add(layer_id)
-                    progress = (
-                        f"[进度] docker push 进行中: 已完成 {len(pushed_layers)} 层"
-                        f" | 等待 {len(waiting_layers)} 层"
-                    )
-                    if progress != last_progress_text:
-                        await websocket.send_text(progress)
-                        if persist_log:
-                            append_build_log(progress)
-                        last_progress_text = progress
-                    continue
 
-        if prefix:
-            raw = f"{prefix}{raw}"
-        await websocket.send_text(raw)
-        if persist_log:
-            append_build_log(raw)
-    await proc.wait()
-    RUNNING_PROCS.discard(proc)
+            if prefix:
+                raw = f"{prefix}{raw}"
+            if not websocket_broken:
+                try:
+                    await websocket.send_text(raw)
+                except Exception:
+                    websocket_broken = True
+            if persist_log:
+                append_build_log(raw)
+    finally:
+        await proc.wait()
+        RUNNING_PROCS.discard(proc)
     if BUILD_CANCEL_EVENT.is_set():
         return 130
     return proc.returncode or 0
@@ -504,7 +532,8 @@ async def stream_command(
 
 @app.post("/api/build/cancel")
 async def cancel_build():
-    if not BUILD_LOCK.locked():
+    running = BUILD_LOCK.locked() or any(p.returncode is None for p in RUNNING_PROCS)
+    if not running:
         return {"ok": True, "message": "当前没有运行中的构建任务"}
     BUILD_CANCEL_EVENT.set()
     for p in list(RUNNING_PROCS):
@@ -519,6 +548,12 @@ async def cancel_build():
 async def cancel_build_get():
     # 兼容旧前端或缓存资源触发的 GET 请求
     return await cancel_build()
+
+
+@app.get("/api/build/status")
+async def get_build_status():
+    running = BUILD_LOCK.locked() or any(p.returncode is None for p in RUNNING_PROCS)
+    return {"running": running, "cancel_requested": BUILD_CANCEL_EVENT.is_set()}
 
 
 @app.get("/api/projects")

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, nextTick, onMounted } from "vue";
+import { ref, computed, nextTick, onMounted, onUnmounted } from "vue";
 import { ElMessage } from "element-plus";
 
 const projects = ref([]);
@@ -19,8 +19,10 @@ const useBuildProxy = ref(false);
 const showHistory = ref(false);
 const wsConnected = ref(false);
 const building = ref(false);
+const remoteRunning = ref(false);
 const finishedOk = ref(null);
 let socket = null;
+let statusTimer = null;
 
 const phase = ref("idle");
 
@@ -56,11 +58,16 @@ function inferPhase(line) {
 }
 
 const logRef = ref(null);
+const taskRunning = computed(() => building.value || remoteRunning.value);
 
 function appendLog(line) {
   logLines.value.push(line);
   const p = inferPhase(line);
   if (p) phase.value = p;
+  scrollLogToBottom();
+}
+
+function scrollLogToBottom() {
   nextTick(() => {
     const el = logRef.value;
     if (el) el.scrollTop = el.scrollHeight;
@@ -130,6 +137,7 @@ async function fetchSavedLog() {
     const data = await r.json();
     if (Array.isArray(data)) {
       logLines.value = data;
+      scrollLogToBottom();
     }
   } catch (e) {
     // 网络异常时保留当前日志
@@ -149,6 +157,26 @@ async function fetchBuildHistory() {
     }
   } catch (e) {
     // 网络异常时保留当前记录
+  }
+}
+
+async function fetchBuildStatus() {
+  try {
+    const r = await fetch("/api/build/status");
+    if (!r.ok) return;
+    const data = await r.json();
+    const running = !!(data && data.running);
+    remoteRunning.value = running;
+    // 刷新页面后也能感知已有任务，允许“终止构建”
+    if (running && !wsConnected.value) {
+      building.value = true;
+      if (phase.value === "idle") phase.value = "preparing";
+    }
+    if (!running && !wsConnected.value) {
+      building.value = false;
+    }
+  } catch {
+    // 忽略网络波动
   }
 }
 
@@ -235,6 +263,7 @@ function startBuild() {
 
   socket.onopen = () => {
     wsConnected.value = true;
+    remoteRunning.value = true;
   };
 
   socket.onmessage = (ev) => {
@@ -243,6 +272,7 @@ function startBuild() {
       finishedOk.value = true;
       phase.value = "success";
       building.value = false;
+      remoteRunning.value = false;
       disconnect();
       ElMessage.success("构建与推送完成");
       fetchBuildHistory();
@@ -253,6 +283,7 @@ function startBuild() {
       finishedOk.value = false;
       if (phase.value !== "success") phase.value = "failed";
       building.value = false;
+      remoteRunning.value = false;
       disconnect();
       ElMessage.error("构建或推送失败");
       fetchBuildHistory();
@@ -266,6 +297,7 @@ function startBuild() {
     appendLog("[ERROR] WebSocket 连接错误");
     phase.value = "failed";
     building.value = false;
+    remoteRunning.value = false;
     finishedOk.value = false;
   };
 
@@ -282,7 +314,7 @@ function startBuild() {
 }
 
 async function cancelBuild() {
-  if (!building.value) return;
+  if (!taskRunning.value) return;
   try {
     const r = await fetch("/api/build/cancel", { method: "POST" });
     if (!r.ok) throw new Error(await r.text());
@@ -299,7 +331,16 @@ onMounted(async () => {
     fetchProxyOptions(),
     fetchSavedLog(),
     fetchBuildHistory(),
+    fetchBuildStatus(),
   ]);
+  statusTimer = window.setInterval(fetchBuildStatus, 3000);
+});
+
+onUnmounted(() => {
+  if (statusTimer) {
+    window.clearInterval(statusTimer);
+    statusTimer = null;
+  }
 });
 </script>
 
@@ -335,8 +376,8 @@ onMounted(async () => {
       <el-button
         type="primary"
         class="btn-build"
-        :loading="building"
-        :disabled="!selected"
+        :loading="taskRunning"
+        :disabled="!selected || taskRunning"
         @click="startBuild"
       >
         开始构建
@@ -400,10 +441,10 @@ onMounted(async () => {
     <el-main class="main">
       <div class="toolbar">
         <el-tag :type="statusType" effect="dark" size="large">{{ statusLabel }}</el-tag>
-        <el-button size="small" :disabled="building || !selected" @click="startBuild">
+        <el-button size="small" :disabled="taskRunning || !selected" @click="startBuild">
           重新构建
         </el-button>
-        <el-button size="small" type="danger" :disabled="!building" @click="cancelBuild">
+        <el-button size="small" type="danger" :disabled="!taskRunning" @click="cancelBuild">
           终止构建
         </el-button>
         <el-button size="small" @click="showHistory = !showHistory">
