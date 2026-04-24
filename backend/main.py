@@ -345,6 +345,41 @@ def flatten_category_tree(
     return flat
 
 
+def validate_category_max_depth(
+    flat_categories: list[dict[str, Any]], max_depth: int = 3
+) -> None:
+    parent_map: dict[str, Optional[str]] = {
+        str(item["id"]): item.get("parent_id") for item in flat_categories if item.get("id")
+    }
+
+    depth_cache: dict[str, int] = {}
+
+    def calc_depth(node_id: str) -> int:
+        if node_id in depth_cache:
+            return depth_cache[node_id]
+
+        depth = 1
+        current = node_id
+        seen: set[str] = set()
+        while True:
+            parent = parent_map.get(current)
+            if not parent:
+                break
+            if parent in seen:
+                raise HTTPException(status_code=400, detail="类型层级存在循环引用")
+            seen.add(parent)
+            depth += 1
+            if depth > max_depth:
+                raise HTTPException(status_code=400, detail=f"类型层级最多 {max_depth} 层")
+            current = parent
+
+        depth_cache[node_id] = depth
+        return depth
+
+    for cid in parent_map.keys():
+        calc_depth(cid)
+
+
 class SiteCreate(BaseModel):
     name: str = ""
     url: str = Field(min_length=1)
@@ -679,6 +714,50 @@ async def create_site(payload: SiteCreate):
     return site
 
 
+@app.put("/api/sites/{site_id}", response_model=SiteOut)
+async def update_site(site_id: str, payload: SiteCreate):
+    sites = load_sites()
+    if not sites:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    if payload.category_id:
+        categories = normalize_categories(load_site_categories())
+        valid_ids = {x["id"] for x in categories}
+        if payload.category_id not in valid_ids:
+            raise HTTPException(status_code=400, detail="category_id 不存在")
+
+    hit = False
+    updated_site: SiteOut | None = None
+    updated_sites: list[dict[str, Any]] = []
+    for item in sites:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id", "")).strip() == site_id:
+            created_at = str(item.get("created_at", "")).strip() or datetime.now().isoformat(
+                timespec="seconds"
+            )
+            updated_item = {
+                "id": site_id,
+                "name": payload.name,
+                "url": payload.url,
+                "username": payload.username,
+                "password": payload.password,
+                "category_id": payload.category_id,
+                "created_at": created_at,
+            }
+            updated_sites.append(updated_item)
+            updated_site = SiteOut(**updated_item)
+            hit = True
+            continue
+        updated_sites.append(item)
+
+    if not hit or updated_site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    save_sites(updated_sites)
+    return updated_site
+
+
 @app.delete("/api/sites/{site_id}")
 async def delete_site(site_id: str):
     sites = load_sites()
@@ -729,10 +808,29 @@ async def list_site_categories():
 @app.post("/api/site-categories")
 async def create_site_category(payload: SiteCategoryCreate):
     categories = normalize_categories(load_site_categories())
+    parent_map = {x["id"]: x.get("parent_id") for x in categories}
+
+    def parent_depth(cid: str) -> int:
+        depth = 1
+        current = cid
+        seen: set[str] = set()
+        while True:
+            parent = parent_map.get(current)
+            if not parent:
+                break
+            if parent in seen:
+                raise HTTPException(status_code=400, detail="类型层级存在循环引用")
+            seen.add(parent)
+            depth += 1
+            current = parent
+        return depth
+
     if payload.parent_id:
         ids = {x["id"] for x in categories}
         if payload.parent_id not in ids:
             raise HTTPException(status_code=400, detail="parent_id 不存在")
+        if parent_depth(payload.parent_id) + 1 > 3:
+            raise HTTPException(status_code=400, detail="类型层级最多 3 层")
 
     new_category = {
         "id": str(uuid.uuid4()),
@@ -758,6 +856,8 @@ async def reorder_site_categories(payload: SiteCategoryReorder):
     saved_ids = set(categories_by_id.keys())
     if set(incoming_ids) != saved_ids:
         raise HTTPException(status_code=400, detail="tree 节点与已保存类型不一致")
+
+    validate_category_max_depth(flat, max_depth=3)
 
     for item in flat:
         cur = categories_by_id[item["id"]]
@@ -903,7 +1003,13 @@ async def ws_build(websocket: WebSocket, project_name: str):
         if build_proxy_choice:
             await emit(
                 f"[信息] 本次构建代理: {build_proxy_choice.index + 1}/{build_proxy_choice.total} => "
-                f"{build_proxy_choice.url}"
+                f"{build_proxy_choice.url}（BuildKit 拉取 docker.io / syntax 镜像会走此代理）"
+            )
+        elif build_push._global_proxy_urls(cfg):
+            await emit(
+                "[信息] docker build 当前为直连（未使用构建代理）。"
+                "若出现 auth.docker.io / docker.io 超时，请勾选「docker build 时使用代理」"
+                "或给运行本服务的进程配置与手动终端相同的 HTTP(S)_PROXY。"
             )
         await emit(f"$ cd {release_dir} && {' '.join(local_build_cmd)}")
         rc = await stream_command(

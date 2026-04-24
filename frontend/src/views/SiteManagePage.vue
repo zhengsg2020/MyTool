@@ -22,6 +22,14 @@ const categoryForm = reactive({
   parent_id: "",
 });
 const draggingSite = ref(null);
+const editingSiteId = ref("");
+const editForm = reactive({
+  name: "",
+  url: "",
+  username: "",
+  password: "",
+  category_id: "",
+});
 
 const rules = {
   url: [
@@ -66,6 +74,7 @@ const categoryOptions = computed(() => {
         value: node.id,
         label: node.name,
         pathLabel: nextPath.join(" / "),
+        depth: nextPath.length,
       });
       if (Array.isArray(node.children) && node.children.length) {
         out.push(...walk(node.children, nextPath));
@@ -173,6 +182,14 @@ async function createCategory() {
     ElMessage.warning("请输入类型名称");
     return;
   }
+
+  const parent = categoryOptions.value.find((x) => x.value === categoryForm.parent_id);
+  const newDepth = (parent?.depth || 0) + 1;
+  if (newDepth > 3) {
+    ElMessage.warning("最多只能创建 3 层类型");
+    return;
+  }
+
   try {
     const r = await fetch("/api/site-categories", {
       method: "POST",
@@ -197,6 +214,50 @@ function onSiteDragStart(site) {
 
 function onSiteDragEnd() {
   draggingSite.value = null;
+}
+
+function truncateText(value, maxLen) {
+  const text = String(value || "");
+  if (!text) return "-";
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}...`;
+}
+
+function startEditSite(site) {
+  editingSiteId.value = site.id;
+  editForm.name = site.name || "";
+  editForm.url = site.url || "";
+  editForm.username = site.username || "";
+  editForm.password = site.password || "";
+  editForm.category_id = site.category_id || "";
+}
+
+function cancelEditSite() {
+  editingSiteId.value = "";
+}
+
+async function saveEditSite(site) {
+  const payload = {
+    name: editForm.name,
+    url: editForm.url,
+    username: editForm.username,
+    password: editForm.password,
+    category_id: editForm.category_id,
+  };
+
+  try {
+    const r = await fetch(`/api/sites/${encodeURIComponent(site.id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    ElMessage.success("修改成功");
+    editingSiteId.value = "";
+    await fetchSites();
+  } catch (e) {
+    ElMessage.error("修改失败: " + e.message);
+  }
 }
 
 async function assignSiteToCategory(siteId, categoryId) {
@@ -346,27 +407,50 @@ onMounted(async () => {
               删除
             </el-button>
           </div>
-          <div v-else class="site-tree-site">
+          <div v-else class="site-tree-site" :class="{ 'is-editing': editingSiteId === data.site.id }">
             <span class="drag-handle" draggable="true" @dragstart="onSiteDragStart(data.site)" @dragend="onSiteDragEnd">
               拖动
             </span>
-            <span class="site-tree-main">{{ data.site.name || "-" }}</span>
-            <span class="site-tree-url">{{ data.site.url }}</span>
-            <span class="site-tree-cred">{{ data.site.username || "-" }}</span>
-            <span class="site-tree-cred">{{ data.site.password ? "******" : "" }}</span>
-            <el-space class="site-tree-actions">
-              <el-button size="small" type="primary" plain @click="openSite(data.site.url)">访问网站</el-button>
-              <el-button size="small" :disabled="!data.site.username" @click="copyText(data.site.username, '账号')">
-                复制账号
-              </el-button>
-              <el-button size="small" :disabled="!data.site.password" @click="copyText(data.site.password, '密码')">
-                复制密码
-              </el-button>
-              <el-button size="small" :disabled="!data.site.category_id" @click="clearSiteCategory(data.site)">
-                移出类型
-              </el-button>
-              <el-button size="small" type="danger" plain @click="deleteSite(data.site)">删除</el-button>
-            </el-space>
+            <template v-if="editingSiteId === data.site.id">
+              <el-input v-model="editForm.name" size="small" placeholder="名称" class="site-edit-input" />
+              <el-input v-model="editForm.url" size="small" placeholder="URL" class="site-edit-input" />
+              <el-input v-model="editForm.username" size="small" placeholder="账号" class="site-edit-input" />
+              <el-input v-model="editForm.password" size="small" placeholder="密码" class="site-edit-input" />
+            </template>
+            <template v-else>
+              <span class="site-tree-main" :title="data.site.name || '-'">{{ data.site.name || "-" }}</span>
+              <span class="site-tree-url" :title="data.site.url">{{ truncateText(data.site.url, 30) }}</span>
+              <span class="site-tree-cred" :title="data.site.username || '-'">{{ truncateText(data.site.username, 10) }}</span>
+              <span class="site-tree-cred" :title="data.site.password || '-'">{{ truncateText(data.site.password, 10) }}</span>
+            </template>
+            <div class="site-tree-actions" :class="{ 'is-editing': editingSiteId === data.site.id }">
+              <template v-if="editingSiteId === data.site.id">
+                <el-select v-model="editForm.category_id" size="small" clearable placeholder="类型" class="site-edit-category">
+                  <el-option
+                    v-for="item in categoryOptions"
+                    :key="item.value"
+                    :label="item.pathLabel"
+                    :value="item.value"
+                  />
+                </el-select>
+                <el-button size="small" type="primary" @click="saveEditSite(data.site)">保存</el-button>
+                <el-button size="small" @click="cancelEditSite">取消</el-button>
+              </template>
+              <template v-else>
+                <el-button size="small" @click="startEditSite(data.site)">修改</el-button>
+                <el-button size="small" type="primary" plain @click="openSite(data.site.url)">访问网站</el-button>
+                <el-button size="small" :disabled="!data.site.username" @click="copyText(data.site.username, '账号')">
+                  复制账号
+                </el-button>
+                <el-button size="small" :disabled="!data.site.password" @click="copyText(data.site.password, '密码')">
+                  复制密码
+                </el-button>
+                <el-button size="small" :disabled="!data.site.category_id" @click="clearSiteCategory(data.site)">
+                  移出类型
+                </el-button>
+                <el-button size="small" type="danger" plain @click="deleteSite(data.site)">删除</el-button>
+              </template>
+            </div>
           </div>
         </template>
       </el-tree>
@@ -420,18 +504,27 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   font-weight: 600;
+  min-height: 20px;
+  padding: 3px 0;
 }
 .site-tree-site {
+  --site-actions-width: 420px;
   width: 100%;
   display: grid;
-  grid-template-columns: 56px 140px minmax(320px, 1fr) 120px 80px 360px;
+  grid-template-columns: 44px minmax(90px, 140px) minmax(160px, 280px) minmax(70px, 110px) minmax(70px, 110px);
   align-items: center;
-  column-gap: 10px;
-  min-height: 34px;
-  padding: 0 6px;
+  justify-content: start;
+  column-gap: 8px;
+  min-height: 30px;
+  padding: 5px calc(var(--site-actions-width) + 10px) 5px 4px;
   font-size: 13px;
-  line-height: 1.45;
+  line-height: 1.35;
   transition: background-color 0.18s ease;
+  overflow: hidden;
+  position: relative;
+}
+.site-tree-site.is-editing {
+  --site-actions-width: 320px;
 }
 .site-tree-site:hover,
 .site-tree-site:focus-within {
@@ -469,6 +562,57 @@ onMounted(async () => {
   color: #909399;
 }
 .site-tree-actions {
-  white-space: nowrap;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: var(--site-actions-width);
+  display: grid;
+  grid-template-columns: 48px 72px 72px 72px 72px 54px;
+  justify-content: end;
+  column-gap: 6px;
+  align-items: center;
+  overflow: visible;
+}
+.site-tree-actions :deep(.el-button) {
+  margin: 0;
+}
+.site-tree-actions.is-editing {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: var(--site-actions-width);
+  justify-content: flex-end;
+  gap: 6px;
+}
+.site-tree-actions.is-editing :deep(.el-button) {
+  width: auto;
+}
+.site-edit-input {
+  width: 100%;
+}
+.site-edit-category {
+  width: 160px;
+}
+
+:deep(.el-tree-node__content) {
+  height: auto;
+  min-height: 32px;
+  align-items: center;
+}
+
+@media (max-width: 1400px) {
+  .site-tree-site {
+    --site-actions-width: 420px;
+    grid-template-columns: 44px minmax(80px, 120px) minmax(130px, 220px) 90px 90px;
+  }
+
+  .site-tree-site.is-editing {
+    --site-actions-width: 300px;
+  }
 }
 </style>

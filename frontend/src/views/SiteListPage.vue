@@ -137,6 +137,19 @@ function openSite(url) {
   window.open(url, "_blank", "noopener");
 }
 
+function truncateText(value, maxLen) {
+  const text = String(value || "");
+  if (!text) return "-";
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}...`;
+}
+
+function maskPassword(value) {
+  const text = String(value || "");
+  if (!text) return "-";
+  return "******";
+}
+
 async function copyText(text, label) {
   try {
     await navigator.clipboard.writeText(text || "");
@@ -188,11 +201,11 @@ onMounted(async () => {
             <span>{{ data.label }}</span>
           </div>
           <div v-else class="site-tree-site">
-            <span class="site-tree-main">{{ data.site.name || "-" }}</span>
-            <span class="site-tree-url">{{ data.site.url }}</span>
-            <span class="site-tree-cred">{{ data.site.username || "-" }}</span>
-            <span class="site-tree-cred">{{ data.site.password ? "******" : "" }}</span>
-            <el-space class="site-tree-actions">
+            <span class="site-tree-main" :title="data.site.name || '-'">{{ data.site.name || "-" }}</span>
+            <span class="site-tree-url" :title="data.site.url">{{ truncateText(data.site.url, 30) }}</span>
+            <span class="site-tree-cred" :title="data.site.username || '-'">{{ truncateText(data.site.username, 10) }}</span>
+            <span class="site-tree-cred" title="已隐藏">{{ maskPassword(data.site.password) }}</span>
+            <div class="site-tree-actions">
               <el-button size="small" type="primary" plain @click="openSite(data.site.url)">访问网站</el-button>
               <el-button size="small" :disabled="!data.site.username" @click="copyText(data.site.username, '账号')">
                 复制账号
@@ -200,7 +213,7 @@ onMounted(async () => {
               <el-button size="small" :disabled="!data.site.password" @click="copyText(data.site.password, '密码')">
                 复制密码
               </el-button>
-            </el-space>
+            </div>
           </div>
         </template>
       </el-tree>
@@ -230,18 +243,24 @@ onMounted(async () => {
 }
 .site-tree-category {
   font-weight: 600;
+  min-height: 27px;
+  padding: 3px 0;
 }
 .site-tree-site {
+  --site-actions-width: 228px;
   width: 100%;
   display: grid;
-  grid-template-columns: 140px minmax(320px, 1fr) 120px 80px 260px;
+  grid-template-columns: minmax(90px, 140px) minmax(160px, 280px) minmax(70px, 110px) minmax(70px, 110px);
   align-items: center;
-  column-gap: 10px;
-  min-height: 34px;
-  padding: 0 6px;
-  font-size: 15px;
-  line-height: 1.65;
+  justify-content: start;
+  column-gap: 8px;
+  min-height: 30px;
+  padding: 5px calc(var(--site-actions-width) + 10px) 5px 4px;
+  font-size: 13px;
+  line-height: 1.35;
   transition: background-color 0.18s ease;
+  overflow: hidden;
+  position: relative;
 }
 .site-tree-site:hover,
 .site-tree-site:focus-within {
@@ -279,6 +298,32 @@ onMounted(async () => {
   color: #909399;
 }
 .site-tree-actions {
-  white-space: nowrap;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: var(--site-actions-width);
+  display: grid;
+  grid-template-columns: 72px 72px 72px;
+  justify-content: end;
+  column-gap: 6px;
+  align-items: center;
+  overflow: visible;
+}
+.site-tree-actions :deep(.el-button) {
+  margin: 0;
+}
+
+:deep(.el-tree-node__content) {
+  height: auto;
+  min-height: 32px;
+  align-items: center;
+}
+
+@media (max-width: 1400px) {
+  .site-tree-site {
+    --site-actions-width: 228px;
+    grid-template-columns: minmax(80px, 120px) minmax(130px, 220px) 90px 90px;
+  }
 }
 </style>
