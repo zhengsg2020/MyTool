@@ -16,10 +16,9 @@ const selectedBuildProxyIndex = ref(null);
 const usePushProxy = ref(false);
 /**
  * docker build 时是否使用代理（与 config 中 proxy 列表配合）。
- * 默认开启：Dockerfile 常见 # syntax=docker/dockerfile:1 / FROM docker.io 需访问外网；
- * 服务进程环境往往没有 shell 里 export 的代理，不勾选易与「本机手动能编、工具不能编」不一致。
+ * 默认关闭，由用户按需勾选。
  */
-const useBuildProxy = ref(true);
+const useBuildProxy = ref(false);
 const showHistory = ref(false);
 const wsConnected = ref(false);
 const building = ref(false);
