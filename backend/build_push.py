@@ -12,6 +12,8 @@ from __future__ import annotations
       * 本地仓库：使用 "ip" 字段，例如 192.168.1.185:5005/dragon
       * 阿里云仓库：使用 "ALIYUN_URL" + "ALIYUN_PROJECT_NAME"，例如
           g123-jp-stg-registry...aliyuncs.com/dragon
+      * 腾讯云仓库（国内个人版 CCR）：使用 "TENCENT_HOST" + "TENCENT_REPO"（或分设的 GS/CS）
+          ccr.ccs.tencentyun.com/globalalert/gs
   - 镜像名部分：
       * 优先使用仓库配置中的组件名：
           - gs_image_name
@@ -34,6 +36,8 @@ from __future__ import annotations
 """
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import shlex
@@ -43,6 +47,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import timezone
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -50,6 +55,7 @@ from typing import Any, Iterable, List, Optional
 
 PUSH_RETRY_TIMES = 3
 LOGIN_RETRY_TIMES = 3
+API_RETRY_TIMES = 3
 
 
 def runtime_root() -> Path:
@@ -165,6 +171,167 @@ def is_aliyun_repo(repo_cfg: dict[str, Any]) -> bool:
             "ALIYUN_KEY_STR",
         )
     )
+
+
+def _str_field(repo_cfg: dict[str, Any], key: str) -> Optional[str]:
+    raw = repo_cfg.get(key)
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
+def is_tencent_repo(repo_cfg: dict[str, Any]) -> bool:
+    """国内腾讯云个人版 CCR（ccr.ccs.tencentyun.com）。"""
+    if not all(
+        _str_field(repo_cfg, k)
+        for k in ("TENCENT_HOST", "TENCENT_USERNAME", "TENCENT_REGION")
+    ):
+        return False
+    if not (
+        _str_field(repo_cfg, "TENCENT_REPO")
+        or _str_field(repo_cfg, "TENCENT_GS_REPO")
+        or _str_field(repo_cfg, "TENCENT_CS_REPO")
+    ):
+        return False
+    has_password = bool(_str_field(repo_cfg, "TENCENT_PASSWORD"))
+    has_ak = bool(_str_field(repo_cfg, "TENCENT_SECRET_ID") and _str_field(repo_cfg, "TENCENT_SECRET_KEY"))
+    return has_password or has_ak
+
+
+def is_registry_repo(repo_cfg: dict[str, Any]) -> bool:
+    return is_aliyun_repo(repo_cfg) or is_tencent_repo(repo_cfg)
+
+
+def registry_kind(repo_cfg: dict[str, Any]) -> Optional[str]:
+    if is_aliyun_repo(repo_cfg):
+        return "aliyun"
+    if is_tencent_repo(repo_cfg):
+        return "tencent"
+    return None
+
+
+def tencent_repo_path_for_component(repo_cfg: dict[str, Any], component: str) -> Optional[str]:
+    """命名空间路径：优先 TENCENT_REPO；否则按组件读 TENCENT_GS_REPO / TENCENT_CS_REPO。"""
+    common = _str_field(repo_cfg, "TENCENT_REPO")
+    gs_repo = _str_field(repo_cfg, "TENCENT_GS_REPO") or common
+    cs_repo = _str_field(repo_cfg, "TENCENT_CS_REPO") or common
+    if component == "gs":
+        return gs_repo
+    if component in ("logic", "gate", "main"):
+        return cs_repo or gs_repo
+    return cs_repo or gs_repo
+
+
+def _tc3_api_call(
+    *,
+    secret_id: str,
+    secret_key: str,
+    service: str,
+    host: str,
+    action: str,
+    version: str,
+    region: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """腾讯云 API 3.0（TC3-HMAC-SHA256），仅使用标准库。"""
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    date = datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d")
+    payload_str = json.dumps(payload, separators=(",", ":"))
+    ct = "application/json; charset=utf-8"
+    canonical_headers = f"content-type:{ct}\nhost:{host}\n"
+    signed_headers = "content-type;host"
+    hashed_request_payload = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
+    canonical_request = (
+        "POST\n/\n\n"
+        f"{canonical_headers}\n{signed_headers}\n{hashed_request_payload}"
+    )
+    algorithm = "TC3-HMAC-SHA256"
+    credential_scope = f"{date}/{service}/tc3_request"
+    hashed_canonical_request = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    string_to_sign = f"{algorithm}\n{timestamp}\n{credential_scope}\n{hashed_canonical_request}"
+
+    def _sign(key: bytes, msg: str) -> bytes:
+        return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+    secret_date = _sign(("TC3" + secret_key).encode("utf-8"), date)
+    secret_service = _sign(secret_date, service)
+    secret_signing = _sign(secret_service, "tc3_request")
+    signature = hmac.new(
+        secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    authorization = (
+        f"{algorithm} Credential={secret_id}/{credential_scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+    headers = {
+        "Authorization": authorization,
+        "Content-Type": ct,
+        "Host": host,
+        "X-TC-Action": action,
+        "X-TC-Version": version,
+        "X-TC-Timestamp": str(timestamp),
+        "X-TC-Region": region,
+    }
+    req = urllib.request.Request(
+        f"https://{host}",
+        data=payload_str.encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"请求失败: {e.reason}") from e
+    if not isinstance(body, dict):
+        raise RuntimeError("腾讯云 API 返回格式异常")
+    if isinstance(body.get("Response"), dict) and body["Response"].get("Error"):
+        err = body["Response"]["Error"]
+        code = err.get("Code", "Unknown")
+        msg = err.get("Message", str(err))
+        raise RuntimeError(f"{code}: {msg}")
+    return body
+
+
+def _fetch_tencent_ccr_password(repo_cfg: dict[str, Any]) -> str:
+    """通过个人版 CCR API 获取 docker login 密码（含网络波动重试）。"""
+    secret_id = _str_field(repo_cfg, "TENCENT_SECRET_ID")
+    secret_key = _str_field(repo_cfg, "TENCENT_SECRET_KEY")
+    region = _str_field(repo_cfg, "TENCENT_REGION")
+    if not secret_id or not secret_key or not region:
+        raise RuntimeError("未配置 TENCENT_SECRET_ID / TENCENT_SECRET_KEY / TENCENT_REGION")
+
+    last_err: Optional[Exception] = None
+    for idx in range(API_RETRY_TIMES):
+        print(f"[状态] 正在获取腾讯云 CCR 登录密码（尝试 {idx + 1}/{API_RETRY_TIMES}）")
+        try:
+            body = _tc3_api_call(
+                secret_id=secret_id,
+                secret_key=secret_key,
+                service="ccr",
+                host="ccr.tencentcloudapi.com",
+                action="GetUserPassword",
+                version="2018-06-27",
+                region=region,
+                payload={},
+            )
+            resp = body.get("Response") if isinstance(body.get("Response"), dict) else {}
+            for key in ("Password", "password"):
+                value = resp.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            last_err = RuntimeError("GetUserPassword 未返回有效密码")
+        except Exception as exc:
+            last_err = exc
+            print(f"[WARN] 获取腾讯云密码失败: {exc}")
+        if idx < API_RETRY_TIMES - 1:
+            time.sleep(1)
+    if last_err:
+        raise RuntimeError(f"获取腾讯云 CCR 登录密码失败（已重试 {API_RETRY_TIMES} 次）: {last_err}") from last_err
+    raise RuntimeError("获取腾讯云 CCR 登录密码失败")
 
 
 def resolve_gs_restart_api_base(repo_cfg: dict[str, Any], cfg: dict[str, Any]) -> Optional[str]:
@@ -294,18 +461,31 @@ def list_global_proxy_options(cfg: Optional[dict[str, Any]]) -> list[dict[str, A
 
 
 def _proxy_enabled(repo_cfg: dict[str, Any], cfg: Optional[dict[str, Any]]) -> bool:
-    """命令行等未传 WebSocket 参数时，是否走代理（看仓库/根配置 aliyun_proxy_enabled）。"""
-    if "aliyun_proxy_enabled" in repo_cfg:
-        return bool(repo_cfg["aliyun_proxy_enabled"])
+    """命令行等未传 WebSocket 参数时，是否走代理。"""
+    if is_tencent_repo(repo_cfg):
+        key = "tencent_proxy_enabled"
+        default = False
+    elif is_aliyun_repo(repo_cfg):
+        key = "aliyun_proxy_enabled"
+        default = False
+    else:
+        return False
+    if key in repo_cfg:
+        return bool(repo_cfg[key])
     if cfg and isinstance(cfg, dict):
-        return bool(cfg.get("aliyun_proxy_enabled", False))
-    return False
+        return bool(cfg.get(key, default))
+    return default
 
 
 def _proxy_base_index(repo_cfg: dict[str, Any], cfg: Optional[dict[str, Any]]) -> int:
-    raw = repo_cfg.get("aliyun_proxy_index")
-    if raw is None and cfg and isinstance(cfg, dict):
-        raw = cfg.get("aliyun_proxy_index", 0)
+    if is_tencent_repo(repo_cfg):
+        raw = repo_cfg.get("tencent_proxy_index")
+        if raw is None and cfg and isinstance(cfg, dict):
+            raw = cfg.get("tencent_proxy_index", 0)
+    else:
+        raw = repo_cfg.get("aliyun_proxy_index")
+        if raw is None and cfg and isinstance(cfg, dict):
+            raw = cfg.get("aliyun_proxy_index", 0)
     if raw is None:
         raw = 0
     try:
@@ -315,9 +495,14 @@ def _proxy_base_index(repo_cfg: dict[str, Any], cfg: Optional[dict[str, Any]]) -
 
 
 def _proxy_auto_switch(repo_cfg: dict[str, Any], cfg: Optional[dict[str, Any]]) -> bool:
-    raw = repo_cfg.get("aliyun_proxy_auto_switch")
-    if raw is None and cfg and isinstance(cfg, dict):
-        raw = cfg.get("aliyun_proxy_auto_switch", False)
+    if is_tencent_repo(repo_cfg):
+        raw = repo_cfg.get("tencent_proxy_auto_switch")
+        if raw is None and cfg and isinstance(cfg, dict):
+            raw = cfg.get("tencent_proxy_auto_switch", False)
+    else:
+        raw = repo_cfg.get("aliyun_proxy_auto_switch")
+        if raw is None and cfg and isinstance(cfg, dict):
+            raw = cfg.get("aliyun_proxy_auto_switch", False)
     if raw is None:
         return False
     return bool(raw)
@@ -535,6 +720,181 @@ def ensure_aliyun_login(
     raise SystemExit(f"Docker 登录失败: {registry}")
 
 
+def _docker_registry_login(
+    registry: str,
+    username: str,
+    password: str,
+    *,
+    env: Optional[dict[str, str]] = None,
+    dry_run: bool = False,
+) -> None:
+    if dry_run:
+        print(f"[状态] (dry-run) 跳过 Docker 登录: {registry}")
+        return
+    for login_attempt in range(1, LOGIN_RETRY_TIMES + 1):
+        print(
+            f"[状态] 正在登录 Docker 仓库: {registry}（尝试 {login_attempt}/{LOGIN_RETRY_TIMES}）"
+        )
+        subprocess.run(
+            ["docker", "logout", registry],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        login_res = subprocess.run(
+            [
+                "docker",
+                "login",
+                f"--username={username}",
+                f"--password={password}",
+                registry,
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        if login_res.returncode == 0:
+            print(f"[信息] 仓库登录成功: {registry}")
+            return
+        if login_attempt < LOGIN_RETRY_TIMES:
+            print("[WARN] Docker 登录失败，准备重试...")
+            time.sleep(login_attempt * 2)
+    raise SystemExit(f"Docker 登录失败: {registry}")
+
+
+def ensure_tencent_login(
+    repo_cfg: dict[str, Any],
+    *,
+    cfg: Optional[dict[str, Any]] = None,
+    dry_run: bool = False,
+    attempt: int = 1,
+    proxy_index_override: Optional[int] = None,
+    client_use_proxy: Optional[bool] = None,
+) -> None:
+    """
+    国内腾讯云个人版 CCR 登录：
+      1) 优先使用 TENCENT_PASSWORD
+      2) 否则通过 TENCENT_SECRET_ID/KEY 调用 GetUserPassword 获取临时密码
+      3) docker login 到 TENCENT_HOST
+    """
+    if not is_tencent_repo(repo_cfg):
+        return
+    proxy_choice = resolve_proxy_choice(
+        repo_cfg,
+        cfg=cfg,
+        attempt=attempt,
+        proxy_index_override=proxy_index_override,
+        client_use_proxy=client_use_proxy,
+    )
+    registry = _str_field(repo_cfg, "TENCENT_HOST")
+    username = _str_field(repo_cfg, "TENCENT_USERNAME")
+    if not registry or not username:
+        raise SystemExit("腾讯云仓库缺少 TENCENT_HOST 或 TENCENT_USERNAME")
+    if dry_run:
+        if proxy_choice:
+            print(
+                f"[状态] (dry-run) 跳过腾讯云登录: {registry} "
+                f"(代理 {proxy_choice.index + 1}/{proxy_choice.total}: {proxy_choice.url})"
+            )
+        else:
+            print(f"[状态] (dry-run) 跳过腾讯云登录: {registry}")
+        return
+    if proxy_choice:
+        print(
+            f"[信息] 已启用代理: {proxy_choice.index + 1}/{proxy_choice.total} => "
+            f"{proxy_choice.url}"
+        )
+    cmd_env = build_proxy_env(dict(), proxy_choice)
+    password = _str_field(repo_cfg, "TENCENT_PASSWORD")
+    if not password:
+        print("[状态] 正在通过腾讯云 API 获取 CCR 登录密码")
+        password = _fetch_tencent_ccr_password(repo_cfg)
+    print(f"[信息] 腾讯云登录准备: registry={registry}, username={username}")
+    _docker_registry_login(registry, username, password, env=cmd_env, dry_run=False)
+
+
+def ensure_registry_login(
+    repo_cfg: dict[str, Any],
+    *,
+    cfg: Optional[dict[str, Any]] = None,
+    dry_run: bool = False,
+    attempt: int = 1,
+    proxy_index_override: Optional[int] = None,
+    client_use_proxy: Optional[bool] = None,
+) -> None:
+    kind = registry_kind(repo_cfg)
+    if kind == "aliyun":
+        ensure_aliyun_login(
+            repo_cfg,
+            cfg=cfg,
+            dry_run=dry_run,
+            attempt=attempt,
+            proxy_index_override=proxy_index_override,
+            client_use_proxy=client_use_proxy,
+        )
+    elif kind == "tencent":
+        ensure_tencent_login(
+            repo_cfg,
+            cfg=cfg,
+            dry_run=dry_run,
+            attempt=attempt,
+            proxy_index_override=proxy_index_override,
+            client_use_proxy=client_use_proxy,
+        )
+
+
+def ensure_registry_login_with_retry(
+    repo_cfg: dict[str, Any],
+    *,
+    cfg: Optional[dict[str, Any]] = None,
+    dry_run: bool = False,
+    attempt: int = 1,
+    proxy_index_override: Optional[int] = None,
+    client_use_proxy: Optional[bool] = None,
+    times: int = LOGIN_RETRY_TIMES,
+) -> None:
+    """仓库登录（含整流程重试，应对网络波动）。"""
+    if dry_run or not is_registry_repo(repo_cfg):
+        ensure_registry_login(
+            repo_cfg,
+            cfg=cfg,
+            dry_run=dry_run,
+            attempt=attempt,
+            proxy_index_override=proxy_index_override,
+            client_use_proxy=client_use_proxy,
+        )
+        return
+    last_exc: Optional[BaseException] = None
+    for login_round in range(1, times + 1):
+        try:
+            ensure_registry_login(
+                repo_cfg,
+                cfg=cfg,
+                dry_run=False,
+                attempt=attempt,
+                proxy_index_override=proxy_index_override,
+                client_use_proxy=client_use_proxy,
+            )
+            return
+        except (SystemExit, RuntimeError, OSError) as exc:
+            last_exc = exc
+            if login_round < times:
+                print(
+                    f"[WARN] 仓库登录失败，准备重试 "
+                    f"({login_round}/{times}): {exc}"
+                )
+                time.sleep(login_round * 2)
+    if isinstance(last_exc, SystemExit):
+        raise last_exc
+    if last_exc:
+        raise SystemExit(f"仓库登录失败（已重试 {times} 次）: {last_exc}") from last_exc
+    raise SystemExit(f"仓库登录失败（已重试 {times} 次）")
+
+
 @dataclass
 class RepoTarget:
     key: str
@@ -633,12 +993,26 @@ def build_repo_targets(
             if isinstance(aliyun_url, str) and isinstance(aliyun_project, str):
                 prefix = f"{aliyun_url.strip().rstrip('/')}/{aliyun_project.strip().strip('/')}"
 
-        if not prefix:
-            raise SystemExit(f"仓库未配置有效地址(ip 或 ALIYUN_URL/ALIYUN_PROJECT_NAME): {repo_key}")
+        tencent_host = _str_field(repo_cfg, "TENCENT_HOST") if is_tencent_repo(repo_cfg) else None
+
+        if not prefix and not tencent_host:
+            raise SystemExit(
+                f"仓库未配置有效地址(ip、ALIYUN_URL/ALIYUN_PROJECT_NAME 或腾讯云 TENCENT_*): {repo_key}"
+            )
 
         # 2) 解析组件镜像名
         for component, name in _iter_components(repo_cfg, image_name, svr_type=svr_type):
-            full_name = f"{prefix.rstrip('/')}/{name}"
+            if tencent_host:
+                repo_path = tencent_repo_path_for_component(repo_cfg, component)
+                if not repo_path:
+                    raise SystemExit(
+                        f"腾讯云仓库 {repo_key} 未配置组件 {component} 对应的 "
+                        f"TENCENT_REPO 或 TENCENT_GS_REPO/TENCENT_CS_REPO"
+                    )
+                comp_prefix = f"{tencent_host.rstrip('/')}/{repo_path.strip().strip('/')}"
+            else:
+                comp_prefix = prefix or ""
+            full_name = f"{comp_prefix.rstrip('/')}/{name}"
             targets.append(RepoTarget(key=repo_key, full_name=full_name, component=component))
 
     if not targets:
@@ -747,9 +1121,11 @@ def build_and_push(
     logged_in_repos: set[str] = set()
     for t in targets:
         repo_cfg = repos_cfg.get(t.key) if isinstance(repos_cfg, dict) else None
-        if isinstance(repo_cfg, dict) and t.key not in logged_in_repos and is_aliyun_repo(repo_cfg):
-            print(f"[状态] 正在登录阿里云仓库 — {t.key}")
-            ensure_aliyun_login(repo_cfg, cfg=cfg, dry_run=dry_run, attempt=1)
+        if isinstance(repo_cfg, dict) and t.key not in logged_in_repos and is_registry_repo(repo_cfg):
+            kind = registry_kind(repo_cfg)
+            label = "阿里云" if kind == "aliyun" else "腾讯云"
+            print(f"[状态] 正在登录{label}仓库 — {t.key}")
+            ensure_registry_login_with_retry(repo_cfg, cfg=cfg, dry_run=dry_run, attempt=1)
             logged_in_repos.add(t.key)
 
         image_with_tag = f"{t.full_name}:{tag}"
@@ -775,7 +1151,7 @@ def build_and_push(
             print(f"[状态] 推送尝试 {attempt}/{PUSH_RETRY_TIMES} — {image_with_tag}")
             proxy_choice = (
                 resolve_proxy_choice(repo_cfg, cfg=cfg, attempt=attempt)
-                if isinstance(repo_cfg, dict) and is_aliyun_repo(repo_cfg)
+                if isinstance(repo_cfg, dict) and is_registry_repo(repo_cfg)
                 else None
             )
             if proxy_choice:
@@ -793,9 +1169,11 @@ def build_and_push(
                 break
             if attempt < PUSH_RETRY_TIMES:
                 print(f"[WARN] docker push 失败，退出码: {res.returncode}，准备重试...")
-                if isinstance(repo_cfg, dict) and is_aliyun_repo(repo_cfg):
-                    print(f"[状态] 推送失败后重新登录阿里云仓库 — {t.key}")
-                    ensure_aliyun_login(
+                if isinstance(repo_cfg, dict) and is_registry_repo(repo_cfg):
+                    kind = registry_kind(repo_cfg)
+                    label = "阿里云" if kind == "aliyun" else "腾讯云"
+                    print(f"[状态] 推送失败后重新登录{label}仓库 — {t.key}")
+                    ensure_registry_login_with_retry(
                         repo_cfg,
                         cfg=cfg,
                         dry_run=False,

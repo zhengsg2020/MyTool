@@ -12,6 +12,10 @@
         "lnp_dev": {
             "image_name": "lnp_dev",
             "repositories": ["test2"]
+        },
+        "lnp_tencent": {
+            "image_name": "lnp_trunk",
+            "repositories": ["tencent_cn"]
         }
     },
     "repositories": {
@@ -37,6 +41,18 @@
             "ALIYUN_KEY_STR": "<your-registry-key>",
             "gs_image_name": "",
             "logic_image_name": "",
+            "gate_image_name": ""
+        },
+        "tencent_cn": {
+            "TENCENT_HOST": "ccr.ccs.tencentyun.com",
+            "TENCENT_USERNAME": "",
+            "TENCENT_PASSWORD": "",
+            "TENCENT_SECRET_ID": "",
+            "TENCENT_SECRET_KEY": "",
+            "TENCENT_REGION": "ap-guangzhou",
+            "TENCENT_REPO": "globalalert",
+            "gs_image_name": "gs",
+            "logic_image_name": "cs",
             "gate_image_name": ""
         }
     }

@@ -1033,11 +1033,16 @@ async def ws_build(websocket: WebSocket, project_name: str):
             if (
                 isinstance(repo_cfg, dict)
                 and t.key not in logged_in_repos
-                and build_push.is_aliyun_repo(repo_cfg)
+                and build_push.is_registry_repo(repo_cfg)
             ):
-                await emit(f"[状态] 正在登录阿里云仓库 — {t.key}")
+                reg_label = (
+                    "阿里云"
+                    if build_push.registry_kind(repo_cfg) == "aliyun"
+                    else "腾讯云"
+                )
+                await emit(f"[状态] 正在登录{reg_label}仓库 — {t.key}")
                 try:
-                    build_push.ensure_aliyun_login(
+                    build_push.ensure_registry_login_with_retry(
                         repo_cfg,
                         cfg=cfg,
                         dry_run=False,
@@ -1047,10 +1052,10 @@ async def ws_build(websocket: WebSocket, project_name: str):
                     )
                 except Exception as exc:
                     if not hasattr(exc, "args") or not exc.args:
-                        await emit("[ERROR] 阿里云登录失败：未知异常")
+                        await emit(f"[ERROR] {reg_label}登录失败：未知异常")
                     else:
-                        await emit(f"[ERROR] 阿里云登录失败详情：{exc}")
-                    await emit(f"[ERROR] 阿里云登录失败（仓库 {t.key}）：{exc}")
+                        await emit(f"[ERROR] {reg_label}登录失败详情：{exc}")
+                    await emit(f"[ERROR] {reg_label}登录失败（仓库 {t.key}）：{exc}")
                     await emit("FAILED")
                     return
                 logged_in_repos.add(t.key)
@@ -1090,7 +1095,7 @@ async def ws_build(websocket: WebSocket, project_name: str):
                         proxy_index_override=push_proxy_index_override,
                         client_use_proxy=client_use_push_proxy,
                     )
-                    if isinstance(repo_cfg, dict) and build_push.is_aliyun_repo(repo_cfg)
+                    if isinstance(repo_cfg, dict) and build_push.is_registry_repo(repo_cfg)
                     else None
                 )
                 if proxy_choice:
@@ -1119,13 +1124,18 @@ async def ws_build(websocket: WebSocket, project_name: str):
                     )
                     if (
                         isinstance(repo_cfg, dict)
-                        and build_push.is_aliyun_repo(repo_cfg)
+                        and build_push.is_registry_repo(repo_cfg)
                     ):
+                        reg_label = (
+                            "阿里云"
+                            if build_push.registry_kind(repo_cfg) == "aliyun"
+                            else "腾讯云"
+                        )
                         await emit(
-                            f"[状态] 推送失败后重新登录阿里云仓库 — {t.key}"
+                            f"[状态] 推送失败后重新登录{reg_label}仓库 — {t.key}"
                         )
                         try:
-                            build_push.ensure_aliyun_login(
+                            build_push.ensure_registry_login_with_retry(
                                 repo_cfg,
                                 cfg=cfg,
                                 dry_run=False,
@@ -1135,7 +1145,7 @@ async def ws_build(websocket: WebSocket, project_name: str):
                             )
                         except Exception as exc:
                             await emit(
-                                f"[ERROR] 阿里云重登录失败（仓库 {t.key}）：{exc}"
+                                f"[ERROR] {reg_label}重登录失败（仓库 {t.key}）：{exc}"
                             )
                             await emit("FAILED")
                             return
